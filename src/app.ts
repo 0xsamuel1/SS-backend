@@ -51,6 +51,7 @@ import { createSubscriptionsRouter } from "./routes/subscriptions.routes";
 import { createOnboardingRouter } from "./routes/onboarding.routes";
 import { createCommunityProgramsRouter } from "./routes/community-programs.routes";
 import { createIssuerReputationRouter } from "./routes/issuer-reputation.routes";
+import { createIssuerProfileRouter } from "./routes/issuer-profile.routes";
 import { createOnchainEventViewsRouter } from "./routes/onchain-event-views.routes";
 import { createFxRouter } from "./routes/fx.routes";
 import {
@@ -84,6 +85,7 @@ import type { WatchlistService } from "./services/watchlist.service";
 import type { SettlementWorker } from "./workers/settlement.worker";
 import type { FeeScheduleService } from "./services/fee-schedule.service";
 import type { IssuerReputationService } from "./services/issuer-reputation.service";
+import type { IssuerProfileService } from "./services/issuer-profile.service";
 import type { InvestorRiskProfileService } from "./services/investor-risk-profile.service";
 import type { InvoiceDraftService } from "./services/invoice-draft.service";
 import type { BenchmarkService } from "./services/benchmark.service";
@@ -232,6 +234,8 @@ export interface AppDependencies {
   adminMetricsService?: AdminMetricsService;
   feeScheduleService?: FeeScheduleService;
   issuerReputationService?: IssuerReputationService;
+  /** Issue #779 — public issuer profile aggregation. */
+  issuerProfileService?: IssuerProfileService;
   investorRiskProfileService?: InvestorRiskProfileService;
   draftService?: InvoiceDraftService;
   invoiceEscrowContractService?: import("./services/stellar/invoice-escrow-contract.service").InvoiceEscrowContractService;
@@ -295,6 +299,7 @@ export function createApp({
   adminMetricsService,
   feeScheduleService,
   issuerReputationService,
+  issuerProfileService,
   investorRiskProfileService,
   draftService,
   invoiceEscrowContractService,
@@ -617,6 +622,11 @@ export function createApp({
         adminWallets: config?.admin?.wallets || [],
       })
     );
+  }
+
+  // ---- Issuer Profile (issue #779) ----
+  if (issuerProfileService) {
+    app.use("/api/v1", createIssuerProfileRouter({ issuerProfileService }));
   }
 
   if (swapService) {

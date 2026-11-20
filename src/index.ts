@@ -63,6 +63,7 @@ import { createReferralTierService } from "./services/referral-tier.service";
 import { createYieldBoostService } from "./services/yield-boost.service";
 import { createSecondaryAuctionService } from "./services/secondary-auction.service";
 import { createInvestorAccreditationService } from "./services/investor-accreditation.service";
+import { createIssuerProfileService } from "./services/issuer-profile.service";
 import { PendingStellarConfirmationWorker } from "./workers/reconcile-pending-stellar-state.worker";
 
 export async function bootstrap(): Promise<{
@@ -90,10 +91,14 @@ export async function bootstrap(): Promise<{
     deadLetters: new InMemoryDeadLetterSink(),
     logger,
   });
+  // Issue #779 — issuer profile; its settlement history view is refreshed
+  // whenever an invoice transitions to settled.
+  const issuerProfileService = createIssuerProfileService(dataSource, logger);
   const invoiceStateMachine = createInvoiceStateMachine({
     effects: [
       unlessDispatched(createSellerNotificationEffect(notificationService)),
       createNotificationDispatchEffect(notificationDispatcher),
+      issuerProfileService.createSettlementRefreshEffect(),
     ],
   });
   const invoiceService = new InvoiceService({
@@ -271,6 +276,7 @@ export async function bootstrap(): Promise<{
     invoiceEscrowContractService: invoiceEscrowContract,
     feeScheduleService,
     issuerReputationService,
+    issuerProfileService,
     investorRiskProfileService,
     draftService,
     waitlistService,
