@@ -6,53 +6,116 @@ import type { AuthenticatedRequest } from "../types/auth";
 import { ServiceError } from "../utils/service-error";
 import { HttpError, PublicAppError } from "../utils/http-error";
 import type { InvestorRiskProfileService } from "@/services/investor-risk-profile.service";
+import type { InvestorAccreditationService } from "../services/investor-accreditation.service";
 
 export interface InvestorRouterDependencies {
   authService: AuthService;
-  acknowledgementService: InvestorAcknowledgementService;
+  /** Enables the accreditation acknowledgement endpoints (issue #473). */
+  acknowledgementService?: InvestorAcknowledgementService;
   riskProfileService?: InvestorRiskProfileService;
+  /** Enables PUT /:wallet/accreditation renewal submissions (issue #780). */
+  accreditationService?: InvestorAccreditationService;
 }
 
+const MAX_DOCUMENT_REFERENCE_LENGTH = 512;
+
 /**
- * Investor accreditation acknowledgement endpoints (issue #473).
+ * Investor endpoints: accreditation acknowledgement (issue #473), renewal
+ * (issue #780), risk profile, payouts and scoring.
  * Mounted at /api/v1/investors.
  */
 export function createInvestorRouter({
   authService,
   acknowledgementService,
   riskProfileService,
+  accreditationService,
 }: InvestorRouterDependencies): Router {
   const router = Router();
   const auth = createAuthMiddleware(authService);
 
-  router.post(
-    "/acknowledge",
-    auth,
-    requireInvestor(),
-    async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-      try {
-        const user = req.user!;
-        const bodyVersion =
-          typeof req.body?.termsVersion === "string" ? req.body.termsVersion : undefined;
-        const row = await acknowledgementService.acknowledge({
-          walletAddress: user.stellarAddress,
-          userId: user.id,
-          termsVersion: bodyVersion,
-        });
-        res.status(201).json({
-          success: true,
-          data: {
-            id: row.id,
-            walletAddress: row.walletAddress,
-            termsVersion: row.termsVersion,
-            acknowledgedAt: row.acknowledgedAt.toISOString(),
-          },
-        });
-      } catch (error) {
-        next(mapServiceError(error));
+  // ---- Accreditation renewal (issue #780) ----
+  if (accreditationService) {
+    router.put(
+      "/:wallet/accreditation",
+      auth,
+      async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+        try {
+          const user = req.user!;
+          const rawWallet = req.params.wallet;
+          const wallet = (Array.isArray(rawWallet) ? rawWallet[0] : rawWallet)?.trim();
+
+          if (!wallet || wallet !== user.stellarAddress) {
+            throw new PublicAppError(
+              403,
+              "You can only renew the accreditation of your own wallet.",
+              "FORBIDDEN"
+            );
+          }
+
+          const documentReference =
+            typeof req.body?.documentReference === "string"
+              ? req.body.documentReference.trim()
+              : "";
+          if (!documentReference || documentReference.length > MAX_DOCUMENT_REFERENCE_LENGTH) {
+            throw new PublicAppError(
+              400,
+              `documentReference is required and must be at most ${MAX_DOCUMENT_REFERENCE_LENGTH} characters.`,
+              "VALIDATION_ERROR"
+            );
+          }
+
+          const accreditation = await accreditationService.renewAccreditation(wallet, {
+            documentReference,
+          });
+
+          res.status(200).json({
+            success: true,
+            data: {
+              walletAddress: accreditation.walletAddress,
+              status: accreditation.status,
+              documentReference: accreditation.documentReference,
+              renewalSubmittedAt: accreditation.renewalSubmittedAt?.toISOString() ?? null,
+              expiryDate: accreditation.expiryDate
+                ? new Date(accreditation.expiryDate).toISOString()
+                : null,
+            },
+          });
+        } catch (error) {
+          next(mapServiceError(error));
+        }
       }
-    }
-  );
+    );
+  }
+
+  if (acknowledgementService) {
+    router.post(
+      "/acknowledge",
+      auth,
+      requireInvestor(),
+      async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+        try {
+          const user = req.user!;
+          const bodyVersion =
+            typeof req.body?.termsVersion === "string" ? req.body.termsVersion : undefined;
+          const row = await acknowledgementService.acknowledge({
+            walletAddress: user.stellarAddress,
+            userId: user.id,
+            termsVersion: bodyVersion,
+          });
+          res.status(201).json({
+            success: true,
+            data: {
+              id: row.id,
+              walletAddress: row.walletAddress,
+              termsVersion: row.termsVersion,
+              acknowledgedAt: row.acknowledgedAt.toISOString(),
+            },
+          });
+        } catch (error) {
+          next(mapServiceError(error));
+        }
+      }
+    );
 
     router.get(
       "/acknowledgement-status",
@@ -68,45 +131,46 @@ export function createInvestorRouter({
         }
       }
     );
+  }
 
-    // ---- Investor Payout History & CSV Export (issue #566) ----
-    router.get(
-      "/payouts/history",
-      auth,
-      requireInvestor(),
-      async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-        try {
-          const user = req.user!;
-          res.status(200).json({
-            success: true,
-            data: [],
-            walletAddress: user.stellarAddress,
-          });
-        } catch (error) {
-          next(mapServiceError(error));
-        }
+  // ---- Investor Payout History & CSV Export (issue #566) ----
+  router.get(
+    "/payouts/history",
+    auth,
+    requireInvestor(),
+    async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+      try {
+        const user = req.user!;
+        res.status(200).json({
+          success: true,
+          data: [],
+          walletAddress: user.stellarAddress,
+        });
+      } catch (error) {
+        next(mapServiceError(error));
       }
-    );
+    }
+  );
 
-    router.get(
-      "/payouts/export/csv",
-      auth,
-      requireInvestor(),
-      async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-        try {
-          const user = req.user!;
-          const csvHeader = "payout_id,invoice_id,amount,currency,tx_hash,timestamp\n";
-          res.setHeader("Content-Type", "text/csv");
-          res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="investor-payouts-${user.stellarAddress.slice(0, 8)}.csv"`
-          );
-          res.status(200).send(csvHeader);
-        } catch (error) {
-          next(mapServiceError(error));
-        }
+  router.get(
+    "/payouts/export/csv",
+    auth,
+    requireInvestor(),
+    async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+      try {
+        const user = req.user!;
+        const csvHeader = "payout_id,invoice_id,amount,currency,tx_hash,timestamp\n";
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="investor-payouts-${user.stellarAddress.slice(0, 8)}.csv"`
+        );
+        res.status(200).send(csvHeader);
+      } catch (error) {
+        next(mapServiceError(error));
       }
-    );
+    }
+  );
 
   // ---- Risk Profile Management (issue #595) ----
   if (riskProfileService) {
@@ -148,7 +212,11 @@ export function createInvestorRouter({
           const profile = await riskProfileService.getRiskProfile(user.stellarAddress);
 
           if (!profile) {
-            throw new ServiceError("PROFILE_NOT_FOUND", "Risk profile not found. Please complete the risk questionnaire.", 404);
+            throw new ServiceError(
+              "PROFILE_NOT_FOUND",
+              "Risk profile not found. Please complete the risk questionnaire.",
+              404
+            );
           }
 
           res.status(200).json({ success: true, data: profile });

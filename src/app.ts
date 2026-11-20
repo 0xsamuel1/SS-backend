@@ -90,6 +90,7 @@ import type { BenchmarkService } from "./services/benchmark.service";
 import type { ReferralTierService } from "./services/referral-tier.service";
 import type { YieldBoostService } from "./services/yield-boost.service";
 import type { SecondaryAuctionService } from "./services/secondary-auction.service";
+import type { InvestorAccreditationService } from "./services/investor-accreditation.service";
 
 import dataSource from "./config/database";
 import { getRedisClient } from "./config/redis";
@@ -238,6 +239,8 @@ export interface AppDependencies {
   referralTierService?: ReferralTierService;
   yieldBoostService?: YieldBoostService;
   secondaryAuctionService?: SecondaryAuctionService;
+  /** Issue #780 — accreditation expiry gating and renewal. */
+  accreditationService?: InvestorAccreditationService;
   logger?: AppLogger;
   metricsEnabled?: boolean;
   metricsRegistry?: MetricsRegistry;
@@ -300,6 +303,7 @@ export function createApp({
   referralTierService,
   yieldBoostService,
   secondaryAuctionService,
+  accreditationService,
   logger: appLogger = logger,
   metricsEnabled = true,
   metricsRegistry = new MetricsRegistry(),
@@ -481,6 +485,7 @@ export function createApp({
       invoiceSearchService,
       extensionService,
       draftService,
+      accreditationService,
     });
     app.use("/api/v1/invoices", invoiceRouter);
     app.use("/invoices", invoiceRouter);
@@ -494,16 +499,18 @@ export function createApp({
         authService,
         contractGuardService,
         contractId: pauseGuardContractId,
+        accreditationService,
       })
     );
   }
 
-  // Issue #473 — accreditation acknowledgement
-  if (acknowledgementService) {
+  // Issue #473 — accreditation acknowledgement; issue #780 — renewal
+  if (acknowledgementService || accreditationService) {
     const investorRouter = createInvestorRouter({
       authService,
       acknowledgementService,
       riskProfileService: investorRiskProfileService,
+      accreditationService,
     });
     app.use("/api/v1/investors", investorRouter);
     app.use("/investors", investorRouter);
@@ -542,6 +549,7 @@ export function createApp({
     const secondaryMarketRouter = createSecondaryMarketRouter({
       secondaryMarketService,
       authService,
+      accreditationService,
     });
     app.use("/api/v1/secondary-market", secondaryMarketRouter);
     app.use("/secondary-market", secondaryMarketRouter);

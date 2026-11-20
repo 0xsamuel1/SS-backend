@@ -144,6 +144,11 @@ export class Invoice {
   @Index("idx_invoices_category")
   category!: string | null;
 
+  /** Whether investing in (or buying secondary positions of) this invoice
+   * requires a non-expired investor accreditation (issue #780). */
+  @Column({ name: "requires_accreditation", type: "boolean", default: true })
+  requiresAccreditation!: boolean;
+
   @Column({
     type: "enum",
     enum: InvoiceStatus,

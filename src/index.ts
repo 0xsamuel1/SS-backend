@@ -62,6 +62,7 @@ import { createBenchmarkService } from "./services/benchmark.service";
 import { createReferralTierService } from "./services/referral-tier.service";
 import { createYieldBoostService } from "./services/yield-boost.service";
 import { createSecondaryAuctionService } from "./services/secondary-auction.service";
+import { createInvestorAccreditationService } from "./services/investor-accreditation.service";
 import { PendingStellarConfirmationWorker } from "./workers/reconcile-pending-stellar-state.worker";
 
 export async function bootstrap(): Promise<{
@@ -239,6 +240,9 @@ export async function bootstrap(): Promise<{
   const yieldBoostService = createYieldBoostService(dataSource);
   const secondaryAuctionService = createSecondaryAuctionService(dataSource);
 
+  // ---- Feature: Accreditation expiry gating & renewal (issue #780) ----
+  const accreditationService = createInvestorAccreditationService(dataSource, getRedisClient());
+
   const app = createApp({
     authService,
     notificationService,
@@ -274,6 +278,7 @@ export async function bootstrap(): Promise<{
     referralTierService,
     yieldBoostService,
     secondaryAuctionService,
+    accreditationService,
     config,
     logger,
     metricsEnabled: config.observability.metricsEnabled,

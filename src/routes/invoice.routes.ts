@@ -32,6 +32,11 @@ import { ServiceError } from "../utils/service-error";
 import type { AuthenticatedRequest } from "../types/auth";
 import { createInvoiceDraftsRouter } from "./invoices/drafts.routes";
 import type { InvoiceDraftService } from "../services/invoice-draft.service";
+import type { InvestorAccreditationService } from "../services/investor-accreditation.service";
+import {
+  invoiceIdFromRequest,
+  requireUnexpiredAccreditation,
+} from "../middleware/accreditation-expiry.middleware";
 
 export interface InvoiceRouterDependencies {
   invoiceService: InvoiceService;
@@ -48,6 +53,8 @@ export interface InvoiceRouterDependencies {
   extensionService?: InvoiceExtensionService;
   /** Issue #594 — invoice draft autosave. */
   draftService?: InvoiceDraftService;
+  /** Issue #780 — blocks investing with an expired accreditation. */
+  accreditationService?: InvestorAccreditationService;
 }
 
 /**
@@ -231,6 +238,7 @@ export function createInvoiceRouter({
   invoiceSearchService,
   extensionService,
   draftService,
+  accreditationService,
 }: InvoiceRouterDependencies): Router {
   const router = Router();
   const cache =
@@ -396,12 +404,21 @@ export function createInvoiceRouter({
       ? [checkContractNotPaused({ contractGuardService, contractId })]
       : [];
     const investRateLimiter = createInvestRateLimiter("invoice-invest");
+    const accreditationGuard: RequestHandler[] = accreditationService
+      ? [
+          requireUnexpiredAccreditation({
+            accreditationService,
+            resolveInvoiceId: invoiceIdFromRequest,
+          }),
+        ]
+      : [];
 
     router.post(
       "/:id/invest",
       createAuthMiddleware(authService),
       ...pauseGuard,
       investRateLimiter,
+      ...accreditationGuard,
       validateBody(investSchema),
       investController.invest as RequestHandler
     );
@@ -411,6 +428,7 @@ export function createInvoiceRouter({
       createAuthMiddleware(authService),
       ...pauseGuard,
       investRateLimiter,
+      ...accreditationGuard,
       validateBody(investSchema),
       investController.invest as RequestHandler
     );
