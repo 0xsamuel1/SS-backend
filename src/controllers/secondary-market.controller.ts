@@ -1,37 +1,93 @@
 import { Response } from "express";
 import { SecondaryMarketService } from "../services/secondary-market.service";
 import { AuthenticatedRequest } from "../types/auth";
+import { ServiceError } from "../utils/service-error";
+import { logger } from "../observability/logger";
+
+function first(value: unknown): unknown {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/** First defined value among the accepted aliases of a body field. */
+function pick(body: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    const value = first(body[key]);
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+function sendError(res: Response, err: unknown) {
+  if (err instanceof ServiceError) {
+    return res.status(err.statusCode).json({
+      error: {
+        code: err.code,
+        message: err.message,
+        ...(err.details !== undefined ? { details: err.details } : {}),
+      },
+    });
+  }
+  const statusCode = (err as { statusCode?: number }).statusCode;
+  if (typeof statusCode === "number") {
+    return res.status(statusCode).json({
+      error: {
+        code: (err as { code?: string }).code || "REQUEST_FAILED",
+        message: (err as { message?: string }).message || "Request failed",
+      },
+    });
+  }
+  logger.error("secondary.request_failed", {
+    error: err instanceof Error ? err.message : String(err),
+  });
+  return res.status(500).json({
+    error: { code: "INTERNAL_ERROR", message: "Internal server error" },
+  });
+}
 
 export class SecondaryMarketController {
   constructor(private readonly secondaryMarketService: SecondaryMarketService) {}
 
+  /**
+   * POST /secondary/listings
+   * Body: { invoice_id, fractions, ask_price_per_fraction, expires_at? }
+   * (camelCase `invoiceId`, `quantity`, `pricePerFraction`/`price`, `expiresAt`
+   * are still accepted).
+   */
   createListing = async (req: AuthenticatedRequest, res: Response) => {
     try {
       if (!req.user) {
         return res.status(401).json({ error: "Unauthorized" });
       }
 
-      const { invoiceId, quantity, pricePerFraction, price, expiresAt } = req.body || {};
-      const effectivePrice = pricePerFraction ?? price;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const invoiceId = pick(body, "invoice_id", "invoiceId");
+      const quantity = pick(body, "fractions", "quantity");
+      const pricePerFraction = pick(body, "ask_price_per_fraction", "pricePerFraction", "price");
+      const expiresAt = pick(body, "expires_at", "expiresAt");
 
-      if (!invoiceId || !quantity || !effectivePrice) {
+      if (!invoiceId || !quantity || !pricePerFraction) {
         return res.status(400).json({
           error: {
             code: "MISSING_FIELDS",
-            message: "invoiceId, quantity, and pricePerFraction (or price) are required",
+            message: "invoice_id, fractions and ask_price_per_fraction are required",
           },
         });
       }
 
+      const parsedExpiry = expiresAt ? new Date(String(expiresAt)) : undefined;
+      if (parsedExpiry && Number.isNaN(parsedExpiry.getTime())) {
+        return res.status(400).json({
+          error: { code: "INVALID_EXPIRY", message: "expires_at must be a valid date" },
+        });
+      }
+
       const listing = await this.secondaryMarketService.createListing({
-        invoiceId: Array.isArray(invoiceId) ? invoiceId[0] : invoiceId,
+        invoiceId: String(invoiceId),
         sellerWallet: req.user.stellarAddress,
         sellerId: req.user.id,
-        quantity: Array.isArray(quantity) ? quantity[0] : quantity,
-        pricePerFraction: Array.isArray(effectivePrice) ? effectivePrice[0] : effectivePrice,
-        expiresAt: expiresAt
-          ? new Date(Array.isArray(expiresAt) ? expiresAt[0] : expiresAt)
-          : undefined,
+        quantity: quantity as string | number,
+        pricePerFraction: pricePerFraction as string | number,
+        expiresAt: parsedExpiry,
       });
 
       return res.status(201).json({
@@ -39,14 +95,7 @@ export class SecondaryMarketController {
         data: listing,
       });
     } catch (err: unknown) {
-      const statusCode =
-        (err as { statusCode?: number }).statusCode || (err as { status?: number }).status || 400;
-      return res.status(statusCode).json({
-        error: {
-          code: (err as { code?: string }).code || "INTERNAL_ERROR",
-          message: (err as { message?: string }).message || "Internal server error",
-        },
-      });
+      return sendError(res, err);
     }
   };
 
@@ -85,14 +134,7 @@ export class SecondaryMarketController {
         meta: result.meta,
       });
     } catch (err: unknown) {
-      const statusCode =
-        (err as { statusCode?: number }).statusCode || (err as { status?: number }).status || 400;
-      return res.status(statusCode).json({
-        error: {
-          code: (err as { code?: string }).code || "INTERNAL_ERROR",
-          message: (err as { message?: string }).message || "Internal server error",
-        },
-      });
+      return sendError(res, err);
     }
   };
 
@@ -108,17 +150,14 @@ export class SecondaryMarketController {
         data: listing,
       });
     } catch (err: unknown) {
-      const statusCode =
-        (err as { statusCode?: number }).statusCode || (err as { status?: number }).status || 400;
-      return res.status(statusCode).json({
-        error: {
-          code: (err as { code?: string }).code || "INTERNAL_ERROR",
-          message: (err as { message?: string }).message || "Internal server error",
-        },
-      });
+      return sendError(res, err);
     }
   };
 
+  /**
+   * POST /secondary/listings/:id/purchase (alias: /buy)
+   * Body: { fractions? } — defaults to the whole remaining listing.
+   */
   buyListing = async (req: AuthenticatedRequest, res: Response) => {
     try {
       if (!req.user) {
@@ -126,13 +165,14 @@ export class SecondaryMarketController {
       }
 
       const { id } = req.params;
-      const { quantity } = req.body || {};
+      const body = (req.body || {}) as Record<string, unknown>;
+      const quantity = pick(body, "fractions", "quantity");
 
       const result = await this.secondaryMarketService.buyListing({
         listingId: Array.isArray(id) ? id[0] : id,
         buyerWallet: req.user.stellarAddress,
         buyerId: req.user.id,
-        quantity: quantity ? (Array.isArray(quantity) ? quantity[0] : quantity) : undefined,
+        quantity: quantity as string | number | undefined,
       });
 
       return res.status(200).json({
@@ -140,14 +180,7 @@ export class SecondaryMarketController {
         data: result,
       });
     } catch (err: unknown) {
-      const statusCode =
-        (err as { statusCode?: number }).statusCode || (err as { status?: number }).status || 400;
-      return res.status(statusCode).json({
-        error: {
-          code: (err as { code?: string }).code || "INTERNAL_ERROR",
-          message: (err as { message?: string }).message || "Internal server error",
-        },
-      });
+      return sendError(res, err);
     }
   };
 
@@ -172,14 +205,7 @@ export class SecondaryMarketController {
         data: listing,
       });
     } catch (err: unknown) {
-      const statusCode =
-        (err as { statusCode?: number }).statusCode || (err as { status?: number }).status || 400;
-      return res.status(statusCode).json({
-        error: {
-          code: (err as { code?: string }).code || "INTERNAL_ERROR",
-          message: (err as { message?: string }).message || "Internal server error",
-        },
-      });
+      return sendError(res, err);
     }
   };
 }

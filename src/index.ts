@@ -44,7 +44,11 @@ import { createDividendCycleService } from "./services/dividend-cycle.service";
 import { createOnboardingService } from "./services/onboarding.service";
 import { createSubscriptionStatusService } from "./services/subscription-status.service";
 import { createSorobanSubscriptionReader } from "./services/stellar/soroban-subscription-reader";
-import { createSecondaryMarketService } from "./services/secondary-market.service";
+import {
+  createLockUpOnFundingEffect,
+  createSecondaryMarketService,
+  scheduleListingExpirySweep,
+} from "./services/secondary-market.service";
 import { createWatchlistService } from "./services/watchlist.service";
 import { createSettlementWorker } from "./workers/settlement.worker";
 import { scheduleAnalyticsSnapshotJob } from "./workers/analytics-snapshot.worker";
@@ -103,6 +107,8 @@ export async function bootstrap(): Promise<{
       createNotificationDispatchEffect(notificationDispatcher),
       issuerProfileService.createSettlementRefreshEffect(),
       invoiceDocumentService.createWithdrawalEffect(),
+      // Issue #783 — start the secondary market lock-up when an invoice is funded.
+      createLockUpOnFundingEffect(dataSource, config.secondaryMarket.lockUpPeriodSeconds),
     ],
   });
   const invoiceService = new InvoiceService({
@@ -220,7 +226,6 @@ export async function bootstrap(): Promise<{
     : undefined;
 
   // ---- Feature: Secondary Market ----
-  const secondaryMarketService = createSecondaryMarketService(dataSource, notificationService);
 
   // ---- Feature: Watchlist ----
   const watchlistService = createWatchlistService(dataSource);
@@ -239,6 +244,15 @@ export async function bootstrap(): Promise<{
 
   // ---- Feature: Fee Schedule Management (issue #592) ----
   const feeScheduleService = createFeeScheduleService(dataSource, getRedisClient());
+
+  // ---- Feature: Secondary Market (fees & royalty settlement: issue #783) ----
+  const secondaryMarketService = createSecondaryMarketService(dataSource, notificationService, {
+    feeSchedule: feeScheduleService,
+  });
+  const listingExpirySweep = scheduleListingExpirySweep(
+    secondaryMarketService,
+    config.secondaryMarket.expirySweepIntervalMs
+  );
 
   // ---- Feature: Waitlist Management (issue #599) ----
   const waitlistService = createWaitlistService(dataSource, logger);
@@ -371,6 +385,7 @@ export async function bootstrap(): Promise<{
     void maturityWorker.stop();
     snapshotScheduler.stop();
     subscriptionExpiryScheduler.stop();
+    listingExpirySweep.stop();
     settlementWorker.stop();
     if (pendingStellarConfirmationWorker) {
       void pendingStellarConfirmationWorker.stop();

@@ -51,7 +51,15 @@ export function createSecondaryMarketRouter({
       ]
     : [];
 
-  // POST /secondary-market/listings/:id/buy - Buy a listing
+  // POST /secondary/listings/:id/purchase - Buy (part of) a listing (issue #783)
+  router.post(
+    "/listings/:id/purchase",
+    authMiddleware,
+    ...accreditationGuard,
+    controller.buyListing
+  );
+
+  // POST /secondary-market/listings/:id/buy - Original alias of /purchase
   router.post("/listings/:id/buy", authMiddleware, ...accreditationGuard, controller.buyListing);
 
   // DELETE /secondary-market/listings/:id - Cancel a listing

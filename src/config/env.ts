@@ -61,6 +61,13 @@ export interface AppConfig {
     intervalMs: number;
     batchSize: number;
   };
+  /** Issue #783 — secondary market listing rules. */
+  secondaryMarket: {
+    /** Lock-up after an invoice is funded before holdings can be listed. 0 disables. */
+    lockUpPeriodSeconds: number;
+    /** How often active listings past their expiry are marked expired. */
+    expirySweepIntervalMs: number;
+  };
   sorobanIndexer: {
     enabled: boolean;
     intervalMs: number;
@@ -163,6 +170,15 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`${name} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string | undefined, fallback: number, name: string): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer.`);
   }
   return parsed;
 }
@@ -400,6 +416,19 @@ export function getConfig(): AppConfig {
         process.env.INVOICE_MATURITY_JOB_BATCH_SIZE,
         DEFAULT_MATURITY_BATCH_SIZE,
         "INVOICE_MATURITY_JOB_BATCH_SIZE"
+      ),
+    },
+
+    secondaryMarket: {
+      lockUpPeriodSeconds: parseNonNegativeInteger(
+        process.env.SECONDARY_MARKET_LOCK_UP_PERIOD_SECONDS,
+        0,
+        "SECONDARY_MARKET_LOCK_UP_PERIOD_SECONDS"
+      ),
+      expirySweepIntervalMs: parsePositiveInteger(
+        process.env.SECONDARY_MARKET_EXPIRY_SWEEP_INTERVAL_MS,
+        5 * 60 * 1000,
+        "SECONDARY_MARKET_EXPIRY_SWEEP_INTERVAL_MS"
       ),
     },
 
