@@ -32,6 +32,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
     "type-check": "tsc --noEmit",
+    "migrations:validate": "ts-node scripts/validate-migrations.ts",
     "db:migrate": "node -r ts-node/register ./node_modules/typeorm/cli.js migration:run -d src/config/data-source.ts",
     "db:migrate:revert": "node -r ts-node/register ./node_modules/typeorm/cli.js migration:revert -d src/config/data-source.ts",
     "db:migrate:show": "node -r ts-node/register ./node_modules/typeorm/cli.js migration:show -d src/config/data-source.ts",

@@ -9,6 +9,7 @@ import { sanitizeInputMiddleware } from "./middleware/sanitize-input.middleware"
 
 import { logger, type AppLogger } from "./observability/logger";
 import { getMetricsContentType, MetricsRegistry } from "./observability/metrics";
+import { setSettlementMetricsRegistry } from "./lib/settlement-metrics";
 
 import { randomUUID } from "crypto";
 
@@ -322,6 +323,7 @@ export function createApp({
   http,
 }: AppDependencies) {
   const app = express();
+  setSettlementMetricsRegistry(metricsRegistry);
 
   // ✅ FIX TRUST PROXY
   if (http?.trustProxy !== undefined) {

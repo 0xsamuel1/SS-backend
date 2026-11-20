@@ -11,7 +11,13 @@ import {
   type InvoiceTransition,
 } from "../lib/invoice-state-machine";
 import type { SettleInvoiceInput, SettleInvoiceResult } from "../services/settlement.service";
+import { recordSettlementRetry } from "../lib/settlement-metrics";
 import type { AppLogger } from "../observability/logger";
+import {
+  recordPendingSettlementBacklog,
+  recordSettlementQueueLatency,
+  recordSettlementRetry,
+} from "../lib/settlement-metrics";
 
 type IntervalHandle = ReturnType<typeof setInterval>;
 
@@ -153,7 +159,15 @@ export class InvoiceMaturityWorker {
       );
       result.detected = invoices.map((invoice) => invoice.id);
 
+      const now = Date.now();
+      const oldestDueAt = invoices[0]?.dueDate?.getTime();
+      recordPendingSettlementBacklog({
+        count: invoices.length,
+        oldestAgeSeconds: oldestDueAt === undefined ? 0 : (now - oldestDueAt) / 1000,
+      });
+
       for (const invoice of invoices) {
+        recordSettlementQueueLatency((now - invoice.dueDate.getTime()) / 1000);
         try {
           if (invoice.status === InvoiceStatus.FUNDED) {
             await this.settle(invoice, result);
@@ -162,6 +176,7 @@ export class InvoiceMaturityWorker {
           }
         } catch (error) {
           result.errored.push(invoice.id);
+          recordSettlementRetry();
           this.logger.warn("Failed to process matured invoice.", {
             run_id: result.runId,
             invoice_id: invoice.id,
