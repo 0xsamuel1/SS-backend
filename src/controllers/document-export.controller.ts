@@ -27,7 +27,7 @@ export class DocumentExportController {
   getExportStatus = async (req: Request, res: Response) => {
     try {
       const jobId = req.params.jobId as string;
-      const job = this.documentExportService.getJobStatus(jobId);
+      const job = await this.documentExportService.getJobStatus(jobId);
       if (!job) {
         return res.status(404).json({ error: { code: "export_job_not_found", message: "Export job not found" } });
       }
@@ -55,7 +55,7 @@ export class DocumentExportController {
         return res.status(400).json({ error: { code: "missing_token", message: "token query param is required" } });
       }
 
-      const zipPath = this.documentExportService.getDownloadPath(jobId, token);
+      const zipPath = await this.documentExportService.getDownloadPath(jobId, token);
       return res.download(zipPath, `${jobId}.zip`);
     } catch (err: unknown) {
       return respondWithError(res, err);
