@@ -67,7 +67,8 @@ const baseConfig = {
   // TypeORM rejects such overrides under the default "all" mode, which wraps
   // the entire run in one transaction; "each" honours the per-migration flag.
   migrationsTransactionMode: "each" as const,
-  migrationsRun: !isDevelopment,
+  // Run explicitly through ensureDatabaseReady so preflight checks precede migrations.
+  migrationsRun: false,
 };
 
 export const dataSource = isDevelopment

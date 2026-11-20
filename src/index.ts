@@ -3,6 +3,7 @@ import type { Server } from "http";
 import { createApp } from "./app";
 
 import dataSource from "./config/database";
+import { ensureDatabaseReady } from "./config/migration-startup";
 import { getConfig } from "./config/env";
 import { logger } from "./observability/logger";
 import { MetricsRegistry } from "./observability/metrics";
@@ -77,9 +78,7 @@ export async function bootstrap(): Promise<{
 }> {
   const config = getConfig();
 
-  if (!dataSource.isInitialized) {
-    await dataSource.initialize();
-  }
+  await ensureDatabaseReady(dataSource);
 
   const metricsRegistry = new MetricsRegistry();
 
