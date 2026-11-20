@@ -38,9 +38,10 @@ function sanitizeForFilename(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_");
 }
 
-function extensionFor(filename: string, mimeType: string): string {
-  const existing = path.extname(filename);
+function extensionFor(filename: string | null, mimeType: string | null): string {
+  const existing = filename ? path.extname(filename) : "";
   if (existing) return existing;
+  if (!mimeType) return "";
   const byMime: Record<string, string> = {
     "application/pdf": ".pdf",
     "image/jpeg": ".jpg",

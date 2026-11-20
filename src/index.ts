@@ -44,7 +44,11 @@ import { createDividendCycleService } from "./services/dividend-cycle.service";
 import { createOnboardingService } from "./services/onboarding.service";
 import { createSubscriptionStatusService } from "./services/subscription-status.service";
 import { createSorobanSubscriptionReader } from "./services/stellar/soroban-subscription-reader";
-import { createSecondaryMarketService } from "./services/secondary-market.service";
+import {
+  createLockUpOnFundingEffect,
+  createSecondaryMarketService,
+  scheduleListingExpirySweep,
+} from "./services/secondary-market.service";
 import { createWatchlistService } from "./services/watchlist.service";
 import { createSettlementWorker } from "./workers/settlement.worker";
 import { scheduleAnalyticsSnapshotJob } from "./workers/analytics-snapshot.worker";
@@ -62,6 +66,9 @@ import { createBenchmarkService } from "./services/benchmark.service";
 import { createReferralTierService } from "./services/referral-tier.service";
 import { createYieldBoostService } from "./services/yield-boost.service";
 import { createSecondaryAuctionService } from "./services/secondary-auction.service";
+import { createInvestorAccreditationService } from "./services/investor-accreditation.service";
+import { createIssuerProfileService } from "./services/issuer-profile.service";
+import { createInvoiceDocumentService } from "./services/invoice-document.service";
 import { PendingStellarConfirmationWorker } from "./workers/reconcile-pending-stellar-state.worker";
 
 export async function bootstrap(): Promise<{
@@ -89,10 +96,19 @@ export async function bootstrap(): Promise<{
     deadLetters: new InMemoryDeadLetterSink(),
     logger,
   });
+  // Issue #779 — issuer profile; its settlement history view is refreshed
+  // whenever an invoice transitions to settled.
+  const issuerProfileService = createIssuerProfileService(dataSource, logger);
+  // Issue #781 — registered invoice documents are soft-deleted on withdrawal.
+  const invoiceDocumentService = createInvoiceDocumentService(dataSource, logger);
   const invoiceStateMachine = createInvoiceStateMachine({
     effects: [
       unlessDispatched(createSellerNotificationEffect(notificationService)),
       createNotificationDispatchEffect(notificationDispatcher),
+      issuerProfileService.createSettlementRefreshEffect(),
+      invoiceDocumentService.createWithdrawalEffect(),
+      // Issue #783 — start the secondary market lock-up when an invoice is funded.
+      createLockUpOnFundingEffect(dataSource, config.secondaryMarket.lockUpPeriodSeconds),
     ],
   });
   const invoiceService = new InvoiceService({
@@ -210,7 +226,6 @@ export async function bootstrap(): Promise<{
     : undefined;
 
   // ---- Feature: Secondary Market ----
-  const secondaryMarketService = createSecondaryMarketService(dataSource, notificationService);
 
   // ---- Feature: Watchlist ----
   const watchlistService = createWatchlistService(dataSource);
@@ -230,6 +245,15 @@ export async function bootstrap(): Promise<{
   // ---- Feature: Fee Schedule Management (issue #592) ----
   const feeScheduleService = createFeeScheduleService(dataSource, getRedisClient());
 
+  // ---- Feature: Secondary Market (fees & royalty settlement: issue #783) ----
+  const secondaryMarketService = createSecondaryMarketService(dataSource, notificationService, {
+    feeSchedule: feeScheduleService,
+  });
+  const listingExpirySweep = scheduleListingExpirySweep(
+    secondaryMarketService,
+    config.secondaryMarket.expirySweepIntervalMs
+  );
+
   // ---- Feature: Waitlist Management (issue #599) ----
   const waitlistService = createWaitlistService(dataSource, logger);
 
@@ -238,6 +262,9 @@ export async function bootstrap(): Promise<{
   const referralTierService = createReferralTierService(dataSource);
   const yieldBoostService = createYieldBoostService(dataSource);
   const secondaryAuctionService = createSecondaryAuctionService(dataSource);
+
+  // ---- Feature: Accreditation expiry gating & renewal (issue #780) ----
+  const accreditationService = createInvestorAccreditationService(dataSource, getRedisClient());
 
   const app = createApp({
     authService,
@@ -267,6 +294,8 @@ export async function bootstrap(): Promise<{
     invoiceEscrowContractService: invoiceEscrowContract,
     feeScheduleService,
     issuerReputationService,
+    issuerProfileService,
+    invoiceDocumentService,
     investorRiskProfileService,
     draftService,
     waitlistService,
@@ -274,6 +303,7 @@ export async function bootstrap(): Promise<{
     referralTierService,
     yieldBoostService,
     secondaryAuctionService,
+    accreditationService,
     config,
     logger,
     metricsEnabled: config.observability.metricsEnabled,
@@ -355,6 +385,7 @@ export async function bootstrap(): Promise<{
     void maturityWorker.stop();
     snapshotScheduler.stop();
     subscriptionExpiryScheduler.stop();
+    listingExpirySweep.stop();
     settlementWorker.stop();
     if (pendingStellarConfirmationWorker) {
       void pendingStellarConfirmationWorker.stop();

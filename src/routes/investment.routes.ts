@@ -6,12 +6,19 @@ import { createInvestRateLimiter } from "../middleware/redis-rate-limit.middlewa
 import { checkContractNotPaused } from "../middleware/contract-pause-guard.middleware";
 import type { AuthService } from "../services/auth.service";
 import type { ContractGuardService } from "../services/stellar/contract-guard.service";
+import type { InvestorAccreditationService } from "../services/investor-accreditation.service";
+import {
+  invoiceIdFromRequest,
+  requireUnexpiredAccreditation,
+} from "../middleware/accreditation-expiry.middleware";
 
 export interface InvestmentRouterDependencies {
   investmentService: InvestmentService;
   authService: AuthService;
   contractGuardService?: ContractGuardService;
   contractId?: string | null;
+  /** Issue #780 — blocks investing with an expired accreditation. */
+  accreditationService?: InvestorAccreditationService;
 }
 
 // Rate limit: per-IP and per-wallet sliding window counters stored in Redis
@@ -22,6 +29,7 @@ export function createInvestmentRouter({
   authService,
   contractGuardService,
   contractId = null,
+  accreditationService,
 }: InvestmentRouterDependencies): Router {
   const router = Router();
   const controller = new InvestmentController(investmentService);
@@ -32,6 +40,14 @@ export function createInvestmentRouter({
   const pauseGuard: RequestHandler[] = contractGuardService
     ? [checkContractNotPaused({ contractGuardService, contractId })]
     : [];
+  const accreditationGuard: RequestHandler[] = accreditationService
+    ? [
+        requireUnexpiredAccreditation({
+          accreditationService,
+          resolveInvoiceId: invoiceIdFromRequest,
+        }),
+      ]
+    : [];
 
   // POST /api/v1/investments - Create a new investment commitment
   router.post(
@@ -39,6 +55,7 @@ export function createInvestmentRouter({
     authMiddleware,
     ...pauseGuard,
     investmentRateLimiter,
+    ...accreditationGuard,
     controller.createInvestment
   );
 

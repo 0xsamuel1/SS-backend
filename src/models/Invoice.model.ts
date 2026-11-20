@@ -144,6 +144,21 @@ export class Invoice {
   @Index("idx_invoices_category")
   category!: string | null;
 
+  /** Whether investing in (or buying secondary positions of) this invoice
+   * requires a non-expired investor accreditation (issue #780). */
+  @Column({ name: "requires_accreditation", type: "boolean", default: true })
+  requiresAccreditation!: boolean;
+
+  /** Holders cannot list fractions on the secondary market before this
+   * moment (issue #783). Set when the invoice is funded; null = no lock-up. */
+  @Column({ name: "lock_up_expiry", type: "timestamptz", nullable: true })
+  lockUpExpiry!: Date | null;
+
+  /** Royalty in basis points routed to the issuer on each secondary market
+   * sale of this invoice's fractions (issue #783). 0 = no royalty. */
+  @Column({ name: "secondary_royalty_bps", type: "int", default: 0 })
+  secondaryRoyaltyBps!: number;
+
   @Column({
     type: "enum",
     enum: InvoiceStatus,

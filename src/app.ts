@@ -51,6 +51,8 @@ import { createSubscriptionsRouter } from "./routes/subscriptions.routes";
 import { createOnboardingRouter } from "./routes/onboarding.routes";
 import { createCommunityProgramsRouter } from "./routes/community-programs.routes";
 import { createIssuerReputationRouter } from "./routes/issuer-reputation.routes";
+import { createIssuerProfileRouter } from "./routes/issuer-profile.routes";
+import { createInvoiceDocumentsRouter } from "./routes/invoice-documents.routes";
 import { createOnchainEventViewsRouter } from "./routes/onchain-event-views.routes";
 import { createFxRouter } from "./routes/fx.routes";
 import {
@@ -84,12 +86,15 @@ import type { WatchlistService } from "./services/watchlist.service";
 import type { SettlementWorker } from "./workers/settlement.worker";
 import type { FeeScheduleService } from "./services/fee-schedule.service";
 import type { IssuerReputationService } from "./services/issuer-reputation.service";
+import type { IssuerProfileService } from "./services/issuer-profile.service";
+import type { InvoiceDocumentService } from "./services/invoice-document.service";
 import type { InvestorRiskProfileService } from "./services/investor-risk-profile.service";
 import type { InvoiceDraftService } from "./services/invoice-draft.service";
 import type { BenchmarkService } from "./services/benchmark.service";
 import type { ReferralTierService } from "./services/referral-tier.service";
 import type { YieldBoostService } from "./services/yield-boost.service";
 import type { SecondaryAuctionService } from "./services/secondary-auction.service";
+import type { InvestorAccreditationService } from "./services/investor-accreditation.service";
 
 import dataSource from "./config/database";
 import { getRedisClient } from "./config/redis";
@@ -231,6 +236,10 @@ export interface AppDependencies {
   adminMetricsService?: AdminMetricsService;
   feeScheduleService?: FeeScheduleService;
   issuerReputationService?: IssuerReputationService;
+  /** Issue #779 — public issuer profile aggregation. */
+  issuerProfileService?: IssuerProfileService;
+  /** Issue #781 — invoice document registration by IPFS CID. */
+  invoiceDocumentService?: InvoiceDocumentService;
   investorRiskProfileService?: InvestorRiskProfileService;
   draftService?: InvoiceDraftService;
   invoiceEscrowContractService?: import("./services/stellar/invoice-escrow-contract.service").InvoiceEscrowContractService;
@@ -238,6 +247,8 @@ export interface AppDependencies {
   referralTierService?: ReferralTierService;
   yieldBoostService?: YieldBoostService;
   secondaryAuctionService?: SecondaryAuctionService;
+  /** Issue #780 — accreditation expiry gating and renewal. */
+  accreditationService?: InvestorAccreditationService;
   logger?: AppLogger;
   metricsEnabled?: boolean;
   metricsRegistry?: MetricsRegistry;
@@ -292,6 +303,8 @@ export function createApp({
   adminMetricsService,
   feeScheduleService,
   issuerReputationService,
+  issuerProfileService,
+  invoiceDocumentService,
   investorRiskProfileService,
   draftService,
   invoiceEscrowContractService,
@@ -300,6 +313,7 @@ export function createApp({
   referralTierService,
   yieldBoostService,
   secondaryAuctionService,
+  accreditationService,
   logger: appLogger = logger,
   metricsEnabled = true,
   metricsRegistry = new MetricsRegistry(),
@@ -481,9 +495,20 @@ export function createApp({
       invoiceSearchService,
       extensionService,
       draftService,
+      accreditationService,
     });
     app.use("/api/v1/invoices", invoiceRouter);
     app.use("/invoices", invoiceRouter);
+  }
+
+  // Issue #781 — invoice document registration and retrieval
+  if (invoiceDocumentService) {
+    const invoiceDocumentsRouter = createInvoiceDocumentsRouter({
+      invoiceDocumentService,
+      authService,
+    });
+    app.use("/api/v1/invoices", invoiceDocumentsRouter);
+    app.use("/invoices", invoiceDocumentsRouter);
   }
 
   if (investmentService) {
@@ -494,16 +519,18 @@ export function createApp({
         authService,
         contractGuardService,
         contractId: pauseGuardContractId,
+        accreditationService,
       })
     );
   }
 
-  // Issue #473 — accreditation acknowledgement
-  if (acknowledgementService) {
+  // Issue #473 — accreditation acknowledgement; issue #780 — renewal
+  if (acknowledgementService || accreditationService) {
     const investorRouter = createInvestorRouter({
       authService,
       acknowledgementService,
       riskProfileService: investorRiskProfileService,
+      accreditationService,
     });
     app.use("/api/v1/investors", investorRouter);
     app.use("/investors", investorRouter);
@@ -542,6 +569,7 @@ export function createApp({
     const secondaryMarketRouter = createSecondaryMarketRouter({
       secondaryMarketService,
       authService,
+      accreditationService,
     });
     app.use("/api/v1/secondary-market", secondaryMarketRouter);
     app.use("/secondary-market", secondaryMarketRouter);
@@ -609,6 +637,11 @@ export function createApp({
         adminWallets: config?.admin?.wallets || [],
       })
     );
+  }
+
+  // ---- Issuer Profile (issue #779) ----
+  if (issuerProfileService) {
+    app.use("/api/v1", createIssuerProfileRouter({ issuerProfileService }));
   }
 
   if (swapService) {
