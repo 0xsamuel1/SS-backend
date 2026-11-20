@@ -15,6 +15,7 @@ import {
   type TransitionOptions,
 } from "../lib/invoice-state-machine";
 import { InvoiceStatusHistory } from "../models/InvoiceStatusHistory.model";
+import { InvoiceDocument } from "../models/InvoiceDocument.model";
 import { logger } from "../observability/logger";
 import type { IPFSService, IPFSUploadResult } from "./ipfs.service";
 import { decodeInvoiceCursor, encodeInvoiceCursor } from "../utils/invoice-cursor.utils";
@@ -650,7 +651,15 @@ export class InvoiceService {
       }
 
       invoice.deletedAt = new Date();
-      await this.invoiceRepository.save(invoice);
+      if (this.dataSource) {
+        // Withdrawing an invoice also withdraws its registered documents (issue #781).
+        await this.dataSource.transaction(async (manager) => {
+          await manager.save(Invoice, invoice);
+          await manager.getRepository(InvoiceDocument).softDelete({ invoiceId: invoice.id });
+        });
+      } else {
+        await this.invoiceRepository.save(invoice);
+      }
     } catch (error) {
       if (error instanceof ServiceError) throw error;
       logger.error("Failed to delete invoice", { error, invoiceId });

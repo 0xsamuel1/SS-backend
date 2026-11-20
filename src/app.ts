@@ -52,6 +52,7 @@ import { createOnboardingRouter } from "./routes/onboarding.routes";
 import { createCommunityProgramsRouter } from "./routes/community-programs.routes";
 import { createIssuerReputationRouter } from "./routes/issuer-reputation.routes";
 import { createIssuerProfileRouter } from "./routes/issuer-profile.routes";
+import { createInvoiceDocumentsRouter } from "./routes/invoice-documents.routes";
 import { createOnchainEventViewsRouter } from "./routes/onchain-event-views.routes";
 import { createFxRouter } from "./routes/fx.routes";
 import {
@@ -86,6 +87,7 @@ import type { SettlementWorker } from "./workers/settlement.worker";
 import type { FeeScheduleService } from "./services/fee-schedule.service";
 import type { IssuerReputationService } from "./services/issuer-reputation.service";
 import type { IssuerProfileService } from "./services/issuer-profile.service";
+import type { InvoiceDocumentService } from "./services/invoice-document.service";
 import type { InvestorRiskProfileService } from "./services/investor-risk-profile.service";
 import type { InvoiceDraftService } from "./services/invoice-draft.service";
 import type { BenchmarkService } from "./services/benchmark.service";
@@ -236,6 +238,8 @@ export interface AppDependencies {
   issuerReputationService?: IssuerReputationService;
   /** Issue #779 — public issuer profile aggregation. */
   issuerProfileService?: IssuerProfileService;
+  /** Issue #781 — invoice document registration by IPFS CID. */
+  invoiceDocumentService?: InvoiceDocumentService;
   investorRiskProfileService?: InvestorRiskProfileService;
   draftService?: InvoiceDraftService;
   invoiceEscrowContractService?: import("./services/stellar/invoice-escrow-contract.service").InvoiceEscrowContractService;
@@ -300,6 +304,7 @@ export function createApp({
   feeScheduleService,
   issuerReputationService,
   issuerProfileService,
+  invoiceDocumentService,
   investorRiskProfileService,
   draftService,
   invoiceEscrowContractService,
@@ -494,6 +499,16 @@ export function createApp({
     });
     app.use("/api/v1/invoices", invoiceRouter);
     app.use("/invoices", invoiceRouter);
+  }
+
+  // Issue #781 — invoice document registration and retrieval
+  if (invoiceDocumentService) {
+    const invoiceDocumentsRouter = createInvoiceDocumentsRouter({
+      invoiceDocumentService,
+      authService,
+    });
+    app.use("/api/v1/invoices", invoiceDocumentsRouter);
+    app.use("/invoices", invoiceDocumentsRouter);
   }
 
   if (investmentService) {
