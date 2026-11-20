@@ -33,7 +33,9 @@ function buildMetricKey(labels: RequestMetricLabels): string {
   return `${labels.method}|${labels.route}|${labels.statusClass}`;
 }
 
-const SETTLEMENT_LATENCY_BUCKETS_SECONDS = [1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400];
+const SETTLEMENT_LATENCY_BUCKETS_SECONDS = [
+  1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400,
+];
 
 export type SettlementStage = "pending" | "in_progress";
 export type SettlementOutcome = "completed" | "failed";
@@ -64,7 +66,7 @@ class SecondsHistogram {
     lines.push(
       `${name}_bucket{le="+Inf"} ${this.count}`,
       `${name}_sum ${this.sum}`,
-      `${name}_count ${this.count}`,
+      `${name}_count ${this.count}`
     );
     return lines;
   }
@@ -197,6 +199,11 @@ export class MetricsRegistry {
     return `${lines.join("\n")}\n`;
   }
 
+  addCounter(name: string, count: number): void {
+    if (!Number.isFinite(count) || count < 0) return;
+    this.customCounters.set(name, (this.customCounters.get(name) ?? 0) + count);
+  }
+
   increment(name: string, labels?: Record<string, string>): void {
     const key = labels
       ? `${name}{${Object.entries(labels)
@@ -214,7 +221,7 @@ export class MetricsRegistry {
     ];
     for (const stage of SETTLEMENT_STAGES) {
       lines.push(
-        `stellarsettle_settlement_stage_count{stage="${stage}"} ${this.settlementStageCounts.get(stage) ?? 0}`,
+        `stellarsettle_settlement_stage_count{stage="${stage}"} ${this.settlementStageCounts.get(stage) ?? 0}`
       );
     }
 
@@ -223,11 +230,11 @@ export class MetricsRegistry {
       "# TYPE stellarsettle_settlement_oldest_pending_age_seconds gauge",
       `stellarsettle_settlement_oldest_pending_age_seconds ${this.settlementOldestPendingAgeSeconds}`,
       "# HELP stellarsettle_settlement_transitions_total Settlement flows reaching a terminal outcome.",
-      "# TYPE stellarsettle_settlement_transitions_total counter",
+      "# TYPE stellarsettle_settlement_transitions_total counter"
     );
     for (const outcome of SETTLEMENT_OUTCOMES) {
       lines.push(
-        `stellarsettle_settlement_transitions_total{outcome="${outcome}"} ${this.settlementOutcomeCounts.get(outcome) ?? 0}`,
+        `stellarsettle_settlement_transitions_total{outcome="${outcome}"} ${this.settlementOutcomeCounts.get(outcome) ?? 0}`
       );
     }
 
@@ -237,8 +244,8 @@ export class MetricsRegistry {
       `stellarsettle_settlement_retries_total ${this.settlementRetryCount}`,
       ...this.settlementQueueLatency.render(
         "stellarsettle_settlement_queue_latency_seconds",
-        "Seconds between a settlement's due date and the start of its processing.",
-      ),
+        "Seconds between a settlement's due date and the start of its processing."
+      )
     );
 
     return lines;
