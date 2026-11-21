@@ -254,6 +254,8 @@ export interface AppDependencies {
   issuerProfileService?: IssuerProfileService;
   /** Issue #781 — invoice document registration by IPFS CID. */
   invoiceDocumentService?: InvoiceDocumentService;
+  /** Shared-database document export jobs and archives. */
+  documentExportService?: DocumentExportService;
   invoiceUploadService?: InvoiceUploadService;
   investorRiskProfileService?: InvestorRiskProfileService;
   draftService?: InvoiceDraftService;
@@ -325,6 +327,7 @@ export function createApp({
   issuerReputationService,
   issuerProfileService,
   invoiceDocumentService,
+  documentExportService,
   invoiceUploadService,
   investorRiskProfileService,
   draftService,

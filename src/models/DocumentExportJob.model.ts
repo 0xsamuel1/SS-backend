@@ -7,7 +7,7 @@ import {
   UpdateDateColumn,
 } from "typeorm";
 
-export type DocumentExportJobStatus = "processing" | "completed" | "failed";
+export type DocumentExportJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 @Entity("document_export_jobs")
 @Index("idx_document_export_jobs_status_lease", ["status", "leaseExpiresAt"])
@@ -21,6 +21,15 @@ export class DocumentExportJob {
 
   @Column({ name: "requester_id", type: "uuid" })
   requesterId!: string;
+
+  @Column({ name: "progress", type: "integer", default: 0 })
+  progress!: number;
+
+  @Column({ name: "total_documents", type: "integer", default: 0 })
+  totalDocuments!: number;
+
+  @Column({ name: "processed_documents", type: "integer", default: 0 })
+  processedDocuments!: number;
 
   @Column({ type: "varchar", length: 24 })
   status!: DocumentExportJobStatus;
@@ -51,6 +60,9 @@ export class DocumentExportJob {
 
   @Column({ name: "completed_at", type: "timestamptz", nullable: true })
   completedAt!: Date | null;
+
+  @Column({ name: "cancelled_at", type: "timestamptz", nullable: true })
+  cancelledAt!: Date | null;
 
   @UpdateDateColumn({ name: "updated_at", type: "timestamptz" })
   updatedAt!: Date;

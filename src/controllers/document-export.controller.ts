@@ -32,7 +32,7 @@ export class DocumentExportController {
       }
 
       const jobId = req.params.jobId as string;
-      const job = this.documentExportService.getJobStatus(jobId, user.id);
+      const job = await this.documentExportService.getJobStatus(jobId, user.id);
       // A job for another invoice or another user is reported as missing.
       if (!job || job.invoiceId !== req.params.id) {
         return res.status(404).json({ error: { code: "export_job_not_found", message: "Export job not found" } });
@@ -52,12 +52,12 @@ export class DocumentExportController {
       }
 
       const jobId = req.params.jobId as string;
-      const existing = this.documentExportService.getJobStatus(jobId, user.id);
+      const existing = await this.documentExportService.getJobStatus(jobId, user.id);
       if (!existing || existing.invoiceId !== req.params.id) {
         return res.status(404).json({ error: { code: "export_job_not_found", message: "Export job not found" } });
       }
 
-      const job = this.documentExportService.cancelJob(jobId, user.id);
+      const job = await this.documentExportService.cancelJob(jobId, user.id);
       return res.status(200).json({ success: true, data: serializeJob(job) });
     } catch (err: unknown) {
       return respondWithError(res, err);

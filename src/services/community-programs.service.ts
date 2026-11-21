@@ -6,6 +6,7 @@ import { Referral } from "../models/Referral.model";
 import { WaitlistEntry } from "../models/WaitlistEntry.model";
 import { WaitlistReferralCredit } from "../models/WaitlistReferralCredit.model";
 import { AppError } from "../utils/http-error";
+import { orderWaitlistQueue } from "./waitlist-order";
 
 type WaitlistReferralStatus =
   | "not_provided"

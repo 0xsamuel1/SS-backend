@@ -46,16 +46,24 @@ describe("DocumentExportService", () => {
         rows.push(job);
         return job;
       },
-      findOneBy: async ({ id }: { id: string }) => rows.find((job) => job.id === id) ?? null,
+      findOneBy: async (criteria: Record<string, unknown>) =>
+        rows.find((job) => Object.entries(criteria).every(([key, value]) => job[key as keyof DocumentExportJob] === value)) ?? null,
+      findOneByOrFail: async (criteria: Record<string, unknown>) => {
+        const job = rows.find((candidate) =>
+          Object.entries(criteria).every(([key, value]) => candidate[key as keyof DocumentExportJob] === value));
+        if (!job) throw new Error("job not found");
+        return job;
+      },
       find: async () => rows.filter((job) =>
-        (job.status === "processing" && (job.leaseExpiresAt?.getTime() ?? Infinity) <= Date.now()) ||
-        ((job.status === "completed" || job.status === "failed") &&
+        (job.status === "running" && (job.leaseExpiresAt?.getTime() ?? Infinity) <= Date.now()) ||
+        ((job.status === "completed" || job.status === "failed" || job.status === "cancelled") &&
           (job.expiresAt?.getTime() ?? Infinity) <= Date.now())
       ),
       update: async (criteria: Record<string, unknown>, changes: Partial<DocumentExportJob>) => {
         const job = rows.find((candidate) =>
           candidate.id === criteria.id &&
           (criteria.status === undefined || candidate.status === criteria.status) &&
+          (criteria.requesterId === undefined || candidate.requesterId === criteria.requesterId) &&
           (criteria.leaseOwner === undefined || candidate.leaseOwner === criteria.leaseOwner) &&
           (criteria.leaseExpiresAt === undefined ||
             (candidate.leaseExpiresAt?.getTime() ?? Infinity) <= Date.now())
@@ -67,7 +75,7 @@ describe("DocumentExportService", () => {
       delete: async (criteria: Record<string, unknown>) => {
         const index = rows.findIndex((job) =>
           job.id === criteria.id &&
-          (job.status === "completed" || job.status === "failed") &&
+          (job.status === "completed" || job.status === "failed" || job.status === "cancelled") &&
           (job.expiresAt?.getTime() ?? Infinity) <= Date.now()
         );
         if (index < 0) return { affected: 0 };
@@ -101,7 +109,7 @@ describe("DocumentExportService", () => {
 
   async function waitForStatus(jobId: string, expected: "completed" | "failed") {
     for (let attempt = 0; attempt < 100; attempt++) {
-      const job = await service.getJobStatus(jobId);
+      const job = await service.getJobStatus(jobId, "user-id");
       if (job?.status === expected) return job;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -131,7 +139,7 @@ describe("DocumentExportService", () => {
       id: jobId,
       invoiceId: "invoice-id",
       requesterId: "user-id",
-      status: "processing" as const,
+      status: "queued" as const,
       zipPath: path.join(tempDir, `${jobId}.zip`),
       leaseOwner: "worker-owner",
       leaseExpiresAt: new Date(Date.now() + 60_000),
@@ -141,11 +149,13 @@ describe("DocumentExportService", () => {
     await fs.symlink("/dev/full", job.zipPath!);
 
     const servicePrototype = Object.getPrototypeOf(service) as {
-      runExport: (id: string, number: string, owner: string) => Promise<void>;
+      writeZip: (...args: unknown[]) => Promise<void>;
+      runExport: (id: string, number: string) => Promise<void>;
     };
-    await servicePrototype.runExport.call(service, jobId, "INV-001", "worker-owner");
+    jest.spyOn(servicePrototype, "writeZip").mockRejectedValue(new Error("disk write failed"));
+    await servicePrototype.runExport.call(service, jobId, "INV-001");
 
-    expect((await service.getJobStatus(jobId))?.status).toBe("failed");
+    expect((await service.getJobStatus(jobId, "user-id"))?.status).toBe("failed");
     await expect(fs.lstat(job.zipPath!)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -155,7 +165,7 @@ describe("DocumentExportService", () => {
       id: jobId,
       invoiceId: "invoice-id",
       requesterId: "user-id",
-      status: "processing" as const,
+      status: "running" as const,
       zipPath: path.join(tempDir, `${jobId}.zip`),
       leaseOwner: "worker-owner",
       leaseExpiresAt: new Date(Date.now() + 60_000),
@@ -163,14 +173,14 @@ describe("DocumentExportService", () => {
     });
     rows.push(activeJob);
     await service.cleanupExpiredJobs(new Date(Date.now() + 1_000));
-    expect((await service.getJobStatus(jobId))?.status).toBe("processing");
+    expect((await service.getJobStatus(jobId, "user-id"))?.status).toBe("running");
 
     activeJob.leaseExpiresAt = new Date(Date.now() - 1_000);
     await fs.writeFile(activeJob.zipPath!, "partial");
     await fs.stat(activeJob.zipPath!);
     const firstCleanup = await service.cleanupExpiredJobs(new Date());
     expect(firstCleanup.archivesDeleted).toBe(1);
-    expect((await service.getJobStatus(jobId))?.status).toBe("failed");
+    expect((await service.getJobStatus(jobId, "user-id"))?.status).toBe("failed");
 
     activeJob.expiresAt = new Date(Date.now() - 1_000);
     const expired = await service.cleanupExpiredJobs(new Date());

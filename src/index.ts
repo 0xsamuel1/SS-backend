@@ -369,6 +369,7 @@ export async function bootstrap(): Promise<{
     yieldBoostService,
     secondaryAuctionService,
     accreditationService,
+    documentExportService,
     config,
     logger,
     metricsEnabled: config.observability.metricsEnabled,
@@ -462,6 +463,7 @@ export async function bootstrap(): Promise<{
 
   server.on("close", () => {
     void invoiceCacheService.disconnect();
+    documentExportCleanup.stop();
     if (eventIndexer) {
       eventIndexer.stop();
     }

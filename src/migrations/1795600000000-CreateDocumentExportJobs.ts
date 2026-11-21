@@ -1,6 +1,6 @@
 import { MigrationInterface, QueryRunner, Table, TableIndex } from "typeorm";
 
-export class CreateDocumentExportJobs1755600000000 implements MigrationInterface {
+export class CreateDocumentExportJobs1795600000000 implements MigrationInterface {
   async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.createTable(new Table({
       name: "document_export_jobs",
@@ -9,6 +9,9 @@ export class CreateDocumentExportJobs1755600000000 implements MigrationInterface
         { name: "invoice_id", type: "uuid" },
         { name: "requester_id", type: "uuid" },
         { name: "status", type: "varchar", length: "24" },
+        { name: "progress", type: "integer", default: 0 },
+        { name: "total_documents", type: "integer", default: 0 },
+        { name: "processed_documents", type: "integer", default: 0 },
         { name: "zip_path", type: "varchar", length: "1024", isNullable: true },
         { name: "download_token", type: "varchar", length: "512", isNullable: true },
         { name: "download_token_expires_at", type: "timestamptz", isNullable: true },
@@ -18,6 +21,7 @@ export class CreateDocumentExportJobs1755600000000 implements MigrationInterface
         { name: "expires_at", type: "timestamptz", isNullable: true },
         { name: "created_at", type: "timestamptz", default: "now()" },
         { name: "completed_at", type: "timestamptz", isNullable: true },
+        { name: "cancelled_at", type: "timestamptz", isNullable: true },
         { name: "updated_at", type: "timestamptz", default: "now()" },
       ],
     }), true);
