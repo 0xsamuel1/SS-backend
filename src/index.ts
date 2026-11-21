@@ -75,6 +75,8 @@ import { createYieldBoostService } from "./services/yield-boost.service";
 import { createSecondaryAuctionService } from "./services/secondary-auction.service";
 import { createInvestorAccreditationService } from "./services/investor-accreditation.service";
 import { createIssuerProfileService } from "./services/issuer-profile.service";
+import { SecondaryDepthService, DEPTH_SWEEP_INTERVAL_MS } from "./services/secondary-depth.service";
+import { InvoiceUploadService } from "./services/invoice-upload.service";
 import { createInvoiceDocumentService } from "./services/invoice-document.service";
 import { PendingStellarConfirmationWorker } from "./workers/reconcile-pending-stellar-state.worker";
 
@@ -276,6 +278,16 @@ export async function bootstrap(): Promise<{
   const feeScheduleService = createFeeScheduleService(dataSource, getRedisClient());
 
   // ---- Feature: Secondary Market (fees & royalty settlement: issue #783) ----
+  const secondaryDepthService = new SecondaryDepthService(dataSource, metricsRegistry);
+  let sweepingDepth = false;
+  const depthSweep = setInterval(async () => {
+    if (sweepingDepth) return;
+    sweepingDepth = true;
+    try { await secondaryDepthService.sweep(); }
+    catch (error) { logger.error("Secondary depth sweep failed", { error }); }
+    finally { sweepingDepth = false; }
+  }, DEPTH_SWEEP_INTERVAL_MS);
+  depthSweep.unref();
   const secondaryMarketService = createSecondaryMarketService(dataSource, notificationService, {
     feeSchedule: feeScheduleService,
   });
@@ -323,6 +335,7 @@ export async function bootstrap(): Promise<{
     curveMigrationService: projections.curveMigrationService,
     keyMergeProposalService: projections.keyMergeProposalService,
     secondaryMarketService,
+    secondaryDepthService,
     watchlistService,
     settlementWorker,
     invoiceEscrowContractService: invoiceEscrowContract,
@@ -330,6 +343,7 @@ export async function bootstrap(): Promise<{
     issuerReputationService,
     issuerProfileService,
     invoiceDocumentService,
+    invoiceUploadService: new InvoiceUploadService(dataSource, ipfsService),
     investorRiskProfileService,
     draftService,
     waitlistService,
@@ -349,6 +363,7 @@ export async function bootstrap(): Promise<{
   server.on("close", () => {
     eventIndexer?.stop();
     clearInterval(reconciliationTimer);
+    clearInterval(depthSweep);
   });
 
   // Settlement outcomes for notification dispatch; the state machine effects

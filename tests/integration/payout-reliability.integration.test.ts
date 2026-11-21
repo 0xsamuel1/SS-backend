@@ -1,4 +1,4 @@
-import { AddPayoutSnapshotsAndStatements1795300000000 } from "../../src/migrations/1795300000000-AddPayoutSnapshotsAndStatements";
+import { AddPayoutSnapshotsAndStatements1795500000000 } from "../../src/migrations/1795500000000-AddPayoutSnapshotsAndStatements";
 import "reflect-metadata";
 import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
@@ -428,7 +428,7 @@ pgDescribe("Payout reliability against PostgreSQL (845, 846, 847, 848)", () => {
   it("validates payout migration rollback, legacy backfill and reapplication", async () => {
     const q = ds.createQueryRunner();
     await q.connect();
-    const migration = new AddPayoutSnapshotsAndStatements1795300000000();
+    const migration = new AddPayoutSnapshotsAndStatements1795500000000();
     try {
       await q.startTransaction();
       await migration.down(q);

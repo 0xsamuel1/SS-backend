@@ -1,6 +1,6 @@
 import { MigrationInterface, QueryRunner } from "typeorm";
 
-export class AddPayoutSnapshotsAndStatements1795300000000 implements MigrationInterface {
+export class AddPayoutSnapshotsAndStatements1795500000000 implements MigrationInterface {
   async up(q: QueryRunner): Promise<void> {
     await q.query(`CREATE TABLE "dividend_snapshots" (
       "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
