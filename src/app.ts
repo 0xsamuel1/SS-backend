@@ -55,6 +55,10 @@ import { createOnboardingRouter } from "./routes/onboarding.routes";
 import { createCommunityProgramsRouter } from "./routes/community-programs.routes";
 import { createIssuerReputationRouter } from "./routes/issuer-reputation.routes";
 import { createIssuerProfileRouter } from "./routes/issuer-profile.routes";
+import { createSecondaryDepthRouter } from "./routes/secondary-depth.routes";
+import type { SecondaryDepthService } from "./services/secondary-depth.service";
+import { createInvoiceUploadsRouter } from "./routes/invoice-uploads.routes";
+import type { InvoiceUploadService } from "./services/invoice-upload.service";
 import { createInvoiceDocumentsRouter } from "./routes/invoice-documents.routes";
 import { createOnchainEventViewsRouter } from "./routes/onchain-event-views.routes";
 import { createFxRouter } from "./routes/fx.routes";
@@ -229,6 +233,7 @@ export interface AppDependencies {
   curveMigrationService?: CurveMigrationService;
   keyMergeProposalService?: KeyMergeProposalService;
   secondaryMarketService?: SecondaryMarketService;
+  secondaryDepthService?: SecondaryDepthService;
   watchlistService?: WatchlistService;
   settlementWorker?: SettlementWorker;
   acknowledgementService?: InvestorAcknowledgementService;
@@ -241,6 +246,7 @@ export interface AppDependencies {
   issuerProfileService?: IssuerProfileService;
   /** Issue #781 — invoice document registration by IPFS CID. */
   invoiceDocumentService?: InvoiceDocumentService;
+  invoiceUploadService?: InvoiceUploadService;
   investorRiskProfileService?: InvestorRiskProfileService;
   draftService?: InvoiceDraftService;
   invoiceEscrowContractService?: import("./services/stellar/invoice-escrow-contract.service").InvoiceEscrowContractService;
@@ -297,6 +303,7 @@ export function createApp({
   curveMigrationService,
   keyMergeProposalService,
   secondaryMarketService,
+  secondaryDepthService,
   watchlistService,
   settlementWorker,
   acknowledgementService,
@@ -307,6 +314,7 @@ export function createApp({
   issuerReputationService,
   issuerProfileService,
   invoiceDocumentService,
+  invoiceUploadService,
   investorRiskProfileService,
   draftService,
   invoiceEscrowContractService,
@@ -506,6 +514,12 @@ export function createApp({
     app.use("/invoices", invoiceRouter);
   }
 
+  if (invoiceUploadService) {
+    const uploads = createInvoiceUploadsRouter(invoiceUploadService, authService);
+    app.use("/api/v1/invoices", uploads);
+    app.use("/invoices", uploads);
+  }
+
   // Issue #781 — invoice document registration and retrieval
   if (invoiceDocumentService) {
     const invoiceDocumentsRouter = createInvoiceDocumentsRouter({
@@ -568,6 +582,12 @@ export function createApp({
   if (sellerService) {
     app.use("/api/v1/seller", createSellerRouter({ sellerService, authService }));
     app.use("/seller", createSellerRouter({ sellerService, authService }));
+  }
+
+  if (secondaryDepthService) {
+    const depth = createSecondaryDepthRouter(secondaryDepthService);
+    app.use("/api/v1/secondary-market", depth);
+    app.use("/api/v1/secondary", depth);
   }
 
   if (secondaryMarketService && authService) {
