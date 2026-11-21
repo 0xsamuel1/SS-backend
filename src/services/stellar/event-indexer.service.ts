@@ -281,7 +281,12 @@ export class EventIndexerService {
             })
           : null;
 
-        if (existing?.processed) {
+        const receipts = !existing?.processed && this.dataSource?.options.type === "postgres"
+          ? await this.dataSource.query(
+              `SELECT 1 FROM event_replay_receipts WHERE source = $1 AND scope = $2 AND event_id = $3`,
+              ["soroban_event_logs", event.contractId, eventId],
+            ) : [];
+        if (existing?.processed || receipts.length > 0) {
           processedCount++;
           continue;
         }

@@ -69,6 +69,11 @@ Required for a normal local boot:
 | `CACHE_TTL_INVOICES_LIST`  | `30`                     | TTL in seconds for invoice listing (`GET /invoices`)     |
 | `CACHE_TTL_INVOICE_DETAIL` | `60`                     | TTL in seconds for invoice details (`GET /invoices/:id`) |
 
+See [invoice cache operations](./docs/INVOICE_CACHE.md) for context isolation,
+bounded fills, generation fences, metrics and load checks. Event lifecycle and
+maintenance are documented in [event retention](./docs/EVENT_RETENTION.md);
+legacy enum handling is covered by [enum validation](./docs/ENUM_VALIDATION.md).
+
 ### Webhook & Security Settings
 
 | Variable             | Purpose                                                              |

@@ -1,3 +1,4 @@
+import { createInvoiceCacheService } from "./services/invoice-cache.service";
 import type { Server } from "http";
 
 import { createApp } from "./app";
@@ -100,8 +101,15 @@ export async function bootstrap(): Promise<{
   const issuerProfileService = createIssuerProfileService(dataSource, logger);
   // Issue #781 — registered invoice documents are soft-deleted on withdrawal.
   const invoiceDocumentService = createInvoiceDocumentService(dataSource, logger);
+  const invoiceCacheService = createInvoiceCacheService({
+    redisUrl: config.cache.redisUrl,
+    enabled: config.cache.enabled,
+    listTtlSeconds: config.cache.invoicesListTtlSeconds,
+    detailTtlSeconds: config.cache.invoiceDetailTtlSeconds,
+  });
   const invoiceStateMachine = createInvoiceStateMachine({
     effects: [
+      async ({ invoice }) => invoiceCacheService.invalidateSellerInvoices(invoice.sellerId),
       unlessDispatched(createSellerNotificationEffect(notificationService)),
       createNotificationDispatchEffect(notificationDispatcher),
       issuerProfileService.createSettlementRefreshEffect(),
@@ -269,6 +277,7 @@ export async function bootstrap(): Promise<{
     authService,
     notificationService,
     invoiceService,
+    invoiceCacheService,
     investmentService,
     settlementService,
     adminSettlementService,
@@ -335,7 +344,10 @@ export async function bootstrap(): Promise<{
     createNotificationService(dataSource),
     logger
   );
-  const subscriptionExpiryScheduler = scheduleSubscriptionExpiryJob(subscriptionExpiryNotifier, logger);
+  const subscriptionExpiryScheduler = scheduleSubscriptionExpiryJob(
+    subscriptionExpiryNotifier,
+    logger
+  );
 
   // ---- Start settlement worker cron (hourly) ----
   settlementWorker.start("0 * * * *");
@@ -378,6 +390,7 @@ export async function bootstrap(): Promise<{
   pendingStellarConfirmationWorker?.start();
 
   server.on("close", () => {
+    void invoiceCacheService.disconnect();
     if (eventIndexer) {
       eventIndexer.stop();
     }

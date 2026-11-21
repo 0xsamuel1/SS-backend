@@ -1,3 +1,4 @@
+import type { InvoiceCacheService } from "./services/invoice-cache.service";
 import cors from "cors";
 import helmet from "helmet";
 import express, { Request } from "express";
@@ -9,6 +10,7 @@ import { sanitizeInputMiddleware } from "./middleware/sanitize-input.middleware"
 
 import { logger, type AppLogger } from "./observability/logger";
 import { getMetricsContentType, MetricsRegistry } from "./observability/metrics";
+import { setReliabilityMetricsRegistry } from "./observability/reliability-metrics";
 import { setSettlementMetricsRegistry } from "./lib/settlement-metrics";
 
 import { randomUUID } from "crypto";
@@ -56,10 +58,7 @@ import { createIssuerProfileRouter } from "./routes/issuer-profile.routes";
 import { createInvoiceDocumentsRouter } from "./routes/invoice-documents.routes";
 import { createOnchainEventViewsRouter } from "./routes/onchain-event-views.routes";
 import { createFxRouter } from "./routes/fx.routes";
-import {
-  createBenchmarkRouter,
-  createInvoiceBenchmarkRouter,
-} from "./routes/benchmark.routes";
+import { createBenchmarkRouter, createInvoiceBenchmarkRouter } from "./routes/benchmark.routes";
 import { createReferralTierRouter } from "./routes/referral-tier.routes";
 import { createYieldBoostRouter } from "./routes/yield-boost.routes";
 import {
@@ -207,6 +206,7 @@ export interface AppDependencies {
   authService: AuthService;
   notificationService?: NotificationService;
   invoiceService?: InvoiceService;
+  invoiceCacheService?: InvoiceCacheService;
   investmentService?: InvestmentService;
   settlementService?: SettlementService;
   adminSettlementService?: AdminSettlementService;
@@ -275,6 +275,7 @@ export function createApp({
   authService,
   notificationService,
   invoiceService,
+  invoiceCacheService,
   investmentService,
   settlementService,
   adminSettlementService,
@@ -324,6 +325,7 @@ export function createApp({
 }: AppDependencies) {
   const app = express();
   setSettlementMetricsRegistry(metricsRegistry);
+  setReliabilityMetricsRegistry(metricsRegistry);
 
   // ✅ FIX TRUST PROXY
   if (http?.trustProxy !== undefined) {
@@ -489,6 +491,7 @@ export function createApp({
   if (invoiceService && config) {
     const invoiceRouter = createInvoiceRouter({
       invoiceService,
+      cacheService: invoiceCacheService,
       config,
       investmentService,
       authService,

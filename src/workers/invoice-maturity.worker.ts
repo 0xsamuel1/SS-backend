@@ -11,7 +11,6 @@ import {
   type InvoiceTransition,
 } from "../lib/invoice-state-machine";
 import type { SettleInvoiceInput, SettleInvoiceResult } from "../services/settlement.service";
-import { recordSettlementRetry } from "../lib/settlement-metrics";
 import type { AppLogger } from "../observability/logger";
 import {
   recordPendingSettlementBacklog,
@@ -28,6 +27,7 @@ export interface MaturedInvoice {
   status: InvoiceStatus.PUBLISHED | InvoiceStatus.FUNDED;
   /** Face value; repaid at maturity and distributed to investors pro-rata. */
   amount: string;
+  dueDate?: Date;
 }
 
 export interface MaturedInvoiceRepository {
@@ -167,7 +167,7 @@ export class InvoiceMaturityWorker {
       });
 
       for (const invoice of invoices) {
-        recordSettlementQueueLatency((now - invoice.dueDate.getTime()) / 1000);
+        if (invoice.dueDate) recordSettlementQueueLatency((now - invoice.dueDate.getTime()) / 1000);
         try {
           if (invoice.status === InvoiceStatus.FUNDED) {
             await this.settle(invoice, result);
@@ -260,7 +260,10 @@ class TypeOrmMaturedInvoiceRepository implements MaturedInvoiceRepository {
     const rows = await this.dataSource.getRepository(Invoice).find({
       select: { id: true, status: true, amount: true },
       where: [
-        { status: In([InvoiceStatus.PUBLISHED, InvoiceStatus.FUNDED]), dueDate: LessThanOrEqual(toDateOnly(asOf) as unknown as Date) },
+        {
+          status: In([InvoiceStatus.PUBLISHED, InvoiceStatus.FUNDED]),
+          dueDate: LessThanOrEqual(toDateOnly(asOf) as unknown as Date),
+        },
         { status: InvoiceStatus.PUBLISHED, fundingDeadline: LessThanOrEqual(asOf) },
       ],
       order: { dueDate: "ASC" },
