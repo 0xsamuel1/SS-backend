@@ -104,6 +104,9 @@ describe("DocumentExportService jobs", () => {
 
     expect(job.status).toBe("queued");
     expect(job.progress).toBe(0);
+
+    // Stop the queued job before teardown removes its output directory.
+    service.cancelJob(jobId, OWNER);
   });
 
   it("reports monotonic, bounded progress and reaches 100 only on completion", async () => {
@@ -138,6 +141,8 @@ describe("DocumentExportService jobs", () => {
     expectServiceError(() => service.cancelJob(jobId, OTHER), "export_job_not_found", 404);
     // The failed attempt did not cancel the owner's job.
     expect(service.getJobStatus(jobId, OWNER)!.status).not.toBe("cancelled");
+
+    service.cancelJob(jobId, OWNER);
   });
 
   it("cancels a queued job before any work starts", async () => {

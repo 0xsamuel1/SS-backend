@@ -1,3 +1,6 @@
+import type { PayoutClaimsService } from "./services/payout-claims.service";
+import type { DividendReconciliationService } from "./services/dividend-reconciliation.service";
+import type { RoyaltyStatementsService } from "./services/royalty-statements.service";
 import type { InvoiceCacheService } from "./services/invoice-cache.service";
 import cors from "cors";
 import helmet from "helmet";
@@ -225,6 +228,9 @@ export interface AppDependencies {
   dividendCycleService?: DividendCycleService;
   dividendDistributionService?: DividendDistributionService;
   royaltyEarningsService?: RoyaltyEarningsService;
+  payoutClaimsService?: PayoutClaimsService;
+  dividendReconciliationService?: DividendReconciliationService;
+  royaltyStatementsService?: RoyaltyStatementsService;
   subscriptionStatusService?: SubscriptionStatusService;
   onboardingService?: OnboardingService;
   swapService?: AtomicSwapService;
@@ -295,6 +301,9 @@ export function createApp({
   dividendCycleService,
   dividendDistributionService,
   royaltyEarningsService,
+  payoutClaimsService,
+  dividendReconciliationService,
+  royaltyStatementsService,
   subscriptionStatusService,
   onboardingService,
   swapService,
@@ -632,13 +641,13 @@ export function createApp({
   if (dividendCycleService) {
     app.use(
       "/api/v1/dividends",
-      createDividendsRouter({ dividendCycleService, authService, dividendDistributionService })
+      createDividendsRouter({ dividendCycleService, authService, dividendDistributionService, payoutClaimsService, dividendReconciliationService })
     );
   }
 
   // ---- Royalties: creator earnings and claim history (issue #537) ----
   if (royaltyEarningsService) {
-    app.use("/api/v1/royalties", createRoyaltiesRouter({ royaltyEarningsService, authService }));
+    app.use("/api/v1/royalties", createRoyaltiesRouter({ royaltyEarningsService, authService, payoutClaimsService, royaltyStatementsService }));
   }
 
   // ---- Subscriptions: gated-content access check (issue #539) ----
