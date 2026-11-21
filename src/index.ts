@@ -1,3 +1,8 @@
+import { rpc as PayoutRpc } from "@stellar/stellar-sdk";
+import { reconcilePayoutOutcomes } from "./workers/payout-outcomes.worker";
+import { PayoutClaimsService } from "./services/payout-claims.service";
+import { DividendReconciliationService } from "./services/dividend-reconciliation.service";
+import { RoyaltyStatementsService } from "./services/royalty-statements.service";
 import { createInvoiceCacheService } from "./services/invoice-cache.service";
 import type { Server } from "http";
 
@@ -216,6 +221,24 @@ export async function bootstrap(): Promise<{
   // limits, the integration ACL, curve migrations, atomic swap history, creator
   // royalty earnings and holder dividend cycles.
   const projections = createOnchainProjections({ dataSource, logger });
+  const dividendReconciliationService = new DividendReconciliationService(dataSource);
+  const payoutReader = new PayoutRpc.Server(sorobanConfig.rpcUrl, {
+    allowHttp: sorobanConfig.rpcUrl.startsWith("http://"),
+  });
+  let reconciliationRunning = false;
+  const reconciliationTimer = setInterval(async () => {
+    if (reconciliationRunning) return;
+    reconciliationRunning = true;
+    try {
+      await dividendReconciliationService.runBatch();
+      await reconcilePayoutOutcomes(dataSource, payoutReader);
+    } catch {
+      logger.error("Dividend reconciliation batch failed");
+    } finally {
+      reconciliationRunning = false;
+    }
+  }, 30_000);
+  reconciliationTimer.unref();
 
   // Issue #539 — gated-content access is answered by reading the holder's
   // on-chain key balance, so the status service reads through Soroban rather
@@ -289,6 +312,9 @@ export async function bootstrap(): Promise<{
     dividendCycleService,
     dividendDistributionService: projections.dividendDistributionService,
     royaltyEarningsService: projections.royaltyEarningsService,
+    payoutClaimsService: new PayoutClaimsService(dataSource),
+    dividendReconciliationService,
+    royaltyStatementsService: new RoyaltyStatementsService(dataSource),
     subscriptionStatusService,
     onboardingService,
     swapService: projections.swapService,
@@ -320,7 +346,10 @@ export async function bootstrap(): Promise<{
   const server = app.listen(config.port, () => {
     logger.info("Server running", { port: config.port });
   });
-  server.on("close", () => eventIndexer?.stop());
+  server.on("close", () => {
+    eventIndexer?.stop();
+    clearInterval(reconciliationTimer);
+  });
 
   // Settlement outcomes for notification dispatch; the state machine effects
   // above already notify sellers and investors of each status change.

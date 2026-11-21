@@ -1018,6 +1018,55 @@
       }
     },
     "/api/v1/dividends/claims": {
+      "post": {
+        "summary": "Reserve an idempotent cycle claim",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Original pending reservation"
+          },
+          "200": {
+            "description": "Original terminal outcome"
+          },
+          "400": {
+            "description": "Invalid claim"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "409": {
+            "description": "Locked or recalculated cycle or no entitlement"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "snapshotId",
+                  "revision"
+                ],
+                "properties": {
+                  "snapshotId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "get": {
         "summary": "Dividend claim history",
         "description": "Dividends the authenticated holder wallet has claimed, newest first, with amounts and the on-chain transaction that paid them. Cursor paginated.",
@@ -2022,7 +2071,6 @@
         }
       }
     },
-    "/api/v1/invoices/{id}/escrow-status": {
     "/api/v1/royalties/history": {
       "get": {
         "summary": "Creator royalty claim history",
@@ -2506,6 +2554,390 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/dividends/claims/{key}/transaction": {
+      "post": {
+        "summary": "Bind one prepared transaction hash to a reserved claim",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original claim with immutable transaction binding"
+          },
+          "400": {
+            "description": "Invalid transaction hash"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Claim not owned by caller"
+          },
+          "409": {
+            "description": "Claim is already bound to another transaction"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "txHash"
+                ],
+                "properties": {
+                  "txHash": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/royalties/claims": {
+      "post": {
+        "summary": "Reserve an idempotent cycle claim",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Original pending reservation"
+          },
+          "200": {
+            "description": "Original terminal outcome"
+          },
+          "400": {
+            "description": "Invalid claim"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "409": {
+            "description": "Locked or recalculated cycle or no entitlement"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "cycleId",
+                  "revision"
+                ],
+                "properties": {
+                  "cycleId": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/royalties/claims/{key}/transaction": {
+      "post": {
+        "summary": "Bind one prepared transaction hash to a reserved claim",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original claim with immutable transaction binding"
+          },
+          "400": {
+            "description": "Invalid transaction hash"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Claim not owned by caller"
+          },
+          "409": {
+            "description": "Claim is already bound to another transaction"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "txHash"
+                ],
+                "properties": {
+                  "txHash": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dividends/cycles/{snapshotId}/lock": {
+      "post": {
+        "summary": "Lock cycle",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cycle locked"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Cycle not owned by caller"
+          }
+        },
+        "parameters": [
+          {
+            "name": "snapshotId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/dividends/cycles/{snapshotId}/reconcile": {
+      "post": {
+        "summary": "Reconcile cycle totals and report discrepancies",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted reconciliation report"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Cycle not owned by caller"
+          }
+        },
+        "parameters": [
+          {
+            "name": "snapshotId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/royalties/statements": {
+      "get": {
+        "summary": "Cursor paginated creator royalty statements with exact page totals",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Creator access required"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cycle_from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cycle_to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "key_address",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/royalties/statements/export": {
+      "get": {
+        "summary": "Export creator statement rows and reconciled totals as JSON or CSV",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filtered statement rows and totals; CSV totals are provided in response headers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, format or cursor"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Creator access required"
+          },
+          "413": {
+            "description": "More than 10000 rows; narrow cycle filters"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cycle_from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cycle_to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "key_address",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv"
+              ],
+              "default": "json"
+            }
+          }
+        ]
       }
     }
   }
