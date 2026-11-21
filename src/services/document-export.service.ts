@@ -10,19 +10,33 @@ import { KYCStatus } from "../types/enums";
 import { ServiceError } from "../utils/service-error";
 import type { IPFSService } from "./ipfs.service";
 import { createSignedDownloadToken, verifySignedDownloadToken } from "../lib/signed-url";
+import {
+  advanceProgress,
+  canTransitionExportState,
+  isTerminalExportState,
+  progressForDocuments,
+  type ExportJobState,
+} from "./export-job-state";
 
-export type ExportJobStatus = "processing" | "completed" | "failed";
+export type ExportJobStatus = ExportJobState;
 
 export interface ExportJob {
   id: string;
   invoiceId: string;
+  /** User who requested the export; the only user who may inspect or cancel it. */
+  requestedBy: string;
   status: ExportJobStatus;
+  /** 0-100, never decreases, 100 only once the job is completed. */
+  progress: number;
+  totalDocuments: number;
+  processedDocuments: number;
   zipPath?: string;
   downloadToken?: string;
   downloadTokenExpiresAt?: number;
   error?: string;
   createdAt: number;
   completedAt?: number;
+  cancelledAt?: number;
 }
 
 export interface DocumentExportServiceDependencies {
@@ -83,19 +97,80 @@ export class DocumentExportService {
     const job: ExportJob = {
       id: jobId,
       invoiceId,
-      status: "processing",
+      requestedBy: requestingUserId,
+      status: "queued",
+      progress: 0,
+      totalDocuments: 0,
+      processedDocuments: 0,
       createdAt: Date.now(),
     };
     this.jobs.set(jobId, job);
 
     // Fire-and-forget: the caller polls `getJobStatus`, it does not await this.
-    void this.runExport(job, invoice.invoiceNumber);
+    // Starting on the next turn of the event loop leaves the job observably
+    // `queued` (and cancellable before any work happens) when this returns.
+    setImmediate(() => {
+      void this.runExport(job, invoice.invoiceNumber);
+    });
 
     return { jobId };
   }
 
-  getJobStatus(jobId: string): ExportJob | undefined {
-    return this.jobs.get(jobId);
+  /**
+   * Returns the job only to the user who requested it. Any other caller gets
+   * `undefined`, the same answer as an unknown id, so job ids cannot be probed.
+   */
+  getJobStatus(jobId: string, requestingUserId: string): ExportJob | undefined {
+    const job = this.jobs.get(jobId);
+    if (!job || job.requestedBy !== requestingUserId) return undefined;
+    return job;
+  }
+
+  /**
+   * Cancels a queued or running job (#808).
+   *
+   * Idempotent: cancelling an already-cancelled job returns it unchanged. A job
+   * that has completed or failed cannot be cancelled (409). Not-found and
+   * not-yours look identical (404). The transition is checked and applied in
+   * one synchronous step, so it cannot interleave with the export finishing:
+   * whichever lands first wins and the other sees the new state.
+   */
+  cancelJob(jobId: string, requestingUserId: string): ExportJob {
+    const job = this.getJobStatus(jobId, requestingUserId);
+    if (!job) {
+      throw new ServiceError("export_job_not_found", "Export job not found", 404);
+    }
+    if (job.status === "cancelled") return job;
+    if (!canTransitionExportState(job.status, "cancelled")) {
+      throw new ServiceError(
+        "export_not_cancellable",
+        `A ${job.status} export job cannot be cancelled`,
+        409,
+      );
+    }
+
+    job.status = "cancelled";
+    job.cancelledAt = Date.now();
+    job.completedAt = job.cancelledAt;
+    // A cancelled job never offers a download.
+    delete job.downloadToken;
+    delete job.downloadTokenExpiresAt;
+    if (job.zipPath) {
+      void fs.rm(job.zipPath, { force: true }).catch(() => undefined);
+      delete job.zipPath;
+    }
+    return job;
+  }
+
+  private transition(job: ExportJob, to: ExportJobStatus): boolean {
+    if (!canTransitionExportState(job.status, to)) return false;
+    job.status = to;
+    return true;
+  }
+
+  private setProgress(job: ExportJob, value: number): void {
+    if (isTerminalExportState(job.status)) return;
+    job.progress = advanceProgress(job.progress, value);
   }
 
   /**
@@ -149,19 +224,31 @@ export class DocumentExportService {
   }
 
   private async runExport(job: ExportJob, invoiceNumber: string): Promise<void> {
+    // The job may have been cancelled between being queued and starting.
+    if (!this.transition(job, "running")) return;
+
     try {
       const documents = await this.dependencies.dataSource
         .getRepository(InvoiceDocument)
         .find({ where: { invoiceId: job.invoiceId }, order: { createdAt: "ASC" } });
+      if (job.status !== "running") return;
 
       if (documents.length === 0) {
         throw new ServiceError("no_documents", "This invoice has no documents to export", 404);
       }
+      job.totalDocuments = documents.length;
 
       await fs.mkdir(this.dependencies.tempDir, { recursive: true });
       const zipPath = path.join(this.dependencies.tempDir, `${job.id}.zip`);
 
-      await this.writeZip(zipPath, job.invoiceId, invoiceNumber, documents);
+      await this.writeZip(zipPath, job, invoiceNumber, documents);
+
+      // Cancelled while the archive was being written: discard the file and
+      // leave the job cancelled instead of overwriting that with "completed".
+      if (job.status !== "running") {
+        await fs.rm(zipPath, { force: true }).catch(() => undefined);
+        return;
+      }
 
       const { token, expiresAt } = createSignedDownloadToken(
         this.dependencies.signingSecret,
@@ -169,13 +256,14 @@ export class DocumentExportService {
         this.dependencies.urlTtlMinutes,
       );
 
-      job.status = "completed";
+      if (!this.transition(job, "completed")) return;
+      job.progress = 100;
       job.zipPath = zipPath;
       job.downloadToken = token;
       job.downloadTokenExpiresAt = expiresAt;
       job.completedAt = Date.now();
     } catch (error) {
-      job.status = "failed";
+      if (!this.transition(job, "failed")) return;
       job.error = error instanceof Error ? error.message : "Unknown error";
       job.completedAt = Date.now();
     }
@@ -183,10 +271,11 @@ export class DocumentExportService {
 
   private async writeZip(
     zipPath: string,
-    invoiceId: string,
+    job: ExportJob,
     invoiceNumber: string,
     documents: InvoiceDocument[],
   ): Promise<void> {
+    const invoiceId = job.invoiceId;
     const output = createWriteStream(zipPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
 
@@ -200,6 +289,9 @@ export class DocumentExportService {
     const seenNames = new Map<string, number>();
 
     for (const doc of documents) {
+      // Stop fetching as soon as the job is cancelled.
+      if (job.status !== "running") break;
+
       const fileBuffer = await this.dependencies.ipfsService.fetchFile(doc.cid);
 
       const dateStamp = doc.createdAt.toISOString().slice(0, 10);
@@ -217,6 +309,9 @@ export class DocumentExportService {
       }
 
       archive.append(fileBuffer, { name: entryName });
+
+      job.processedDocuments += 1;
+      this.setProgress(job, progressForDocuments(job.processedDocuments, documents.length));
     }
 
     await archive.finalize();
