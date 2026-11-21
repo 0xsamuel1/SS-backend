@@ -24,6 +24,7 @@ import { Transaction } from "../models/Transaction.model";
 import { logger } from "../observability/logger";
 import type { IPFSService, IPFSUploadResult } from "./ipfs.service";
 import { decodeInvoiceCursor, encodeInvoiceCursor } from "../utils/invoice-cursor.utils";
+import { percentageString } from "../utils/percentage.utils";
 import { parseContentChecksum, verifyDocumentChecksum } from "../lib/document-checksum";
 
 export interface InvoiceRepositoryContract {
@@ -1186,12 +1187,7 @@ export class InvoiceService {
 
       return investments.map((investment) => {
         const investor = investment.investor as unknown as User;
-        const percentage = totalInvested.isZero()
-          ? new Decimal(0)
-          : new Decimal(investment.investmentAmount)
-              .dividedBy(totalInvested)
-              .times(100)
-              .toDecimalPlaces(2);
+        const sharePercent = percentageString(investment.investmentAmount, totalInvested);
 
         const address = investor.stellarAddress || "";
         const truncatedWallet = address.length > 8 ? `${address.slice(0, 4)}...${address.slice(-4)}` : address;
@@ -1199,7 +1195,7 @@ export class InvoiceService {
         return {
           wallet: truncatedWallet,
           amount: investment.investmentAmount,
-          share_percent: percentage.toFixed(2),
+          share_percent: sharePercent,
           committed_at: investment.createdAt,
         };
       });
