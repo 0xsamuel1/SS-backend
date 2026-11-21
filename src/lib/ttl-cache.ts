@@ -1,3 +1,4 @@
+import { cacheContextPrefix, defaultCacheNetwork } from "./cache-key";
 /**
  * Minimal TTL cache used by the read-only on-chain projection endpoints
  * (creator key buy limits, contract ACL, curve migrations, swap history).
@@ -237,7 +238,7 @@ export class TtlCache {
   }
 
   private buildKey(key: string): string {
-    return `${this.namespace}:${key}`;
+    return `${cacheContextPrefix(this.namespace, { network: defaultCacheNetwork(), tenantId: "default", walletScope: "public" })}:${encodeURIComponent(key)}`;
   }
 }
 

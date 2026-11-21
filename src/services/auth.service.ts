@@ -55,6 +55,7 @@ export interface ChallengeRepositoryContract {
   consume(id: string, consumedAt: Date): Promise<boolean>;
   deleteExpired(before: Date): Promise<number>;
   countByStatus(status: "active" | "consumed" | "expired"): Promise<number>;
+  supersedeActive(stellarAddress: string, at: Date): Promise<number>;
 }
 
 interface AuthTokenPayload extends JwtPayload {
@@ -322,6 +323,7 @@ export class AuthService {
       });
 
       try {
+        await this.challengeRepository.supersedeActive(sanitizedKey, issuedAt);
         await this.challengeRepository.create({
           stellarAddress: sanitizedKey,
           nonceHash: hashNonce(nonce),
@@ -944,6 +946,20 @@ class TypeOrmChallengeRepository implements ChallengeRepositoryContract {
         break;
     }
     return qb.getCount();
+  }
+
+  async supersedeActive(stellarAddress: string, at: Date): Promise<number> {
+    const result = await this.repository.update(
+      {
+        stellarAddress,
+        consumedAt: IsNull(),
+      },
+      {
+        consumedAt: at,
+      },
+    );
+
+    return result.affected ?? 0;
   }
 }
 

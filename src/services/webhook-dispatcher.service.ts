@@ -168,7 +168,13 @@ export class WebhookDispatcherService {
     const existing = await this.dataSource
       .getRepository(WebhookDeliveryLog)
       .findOne({ where: { subscriptionId, eventId, delivered: true } });
-    return existing !== null;
+    if (existing !== null) return true;
+    if (this.dataSource.options.type !== "postgres") return false;
+    const receipts = await this.dataSource.query(
+      `SELECT 1 FROM event_replay_receipts WHERE source = $1 AND scope = $2 AND event_id = $3`,
+      ["webhook_delivery_logs", subscriptionId, eventId],
+    );
+    return receipts.length > 0;
   }
 
   private async logDelivery(

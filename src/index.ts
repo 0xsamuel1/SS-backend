@@ -1,9 +1,16 @@
+import { rpc as PayoutRpc } from "@stellar/stellar-sdk";
+import { reconcilePayoutOutcomes } from "./workers/payout-outcomes.worker";
+import { PayoutClaimsService } from "./services/payout-claims.service";
+import { DividendReconciliationService } from "./services/dividend-reconciliation.service";
+import { RoyaltyStatementsService } from "./services/royalty-statements.service";
+import { createInvoiceCacheService } from "./services/invoice-cache.service";
 import type { Server } from "http";
 import path from "path";
 
 import { createApp } from "./app";
 
 import dataSource from "./config/database";
+import { ensureDatabaseReady } from "./config/migration-startup";
 import { getConfig } from "./config/env";
 import { logger } from "./observability/logger";
 import { MetricsRegistry } from "./observability/metrics";
@@ -69,6 +76,8 @@ import { createYieldBoostService } from "./services/yield-boost.service";
 import { createSecondaryAuctionService } from "./services/secondary-auction.service";
 import { createInvestorAccreditationService } from "./services/investor-accreditation.service";
 import { createIssuerProfileService } from "./services/issuer-profile.service";
+import { SecondaryDepthService, DEPTH_SWEEP_INTERVAL_MS } from "./services/secondary-depth.service";
+import { InvoiceUploadService } from "./services/invoice-upload.service";
 import { createInvoiceDocumentService } from "./services/invoice-document.service";
 import { createDocumentExportService } from "./services/document-export.service";
 import { PendingStellarConfirmationWorker } from "./workers/reconcile-pending-stellar-state.worker";
@@ -79,9 +88,7 @@ export async function bootstrap(): Promise<{
 }> {
   const config = getConfig();
 
-  if (!dataSource.isInitialized) {
-    await dataSource.initialize();
-  }
+  await ensureDatabaseReady(dataSource);
 
   const metricsRegistry = new MetricsRegistry();
 
@@ -118,8 +125,15 @@ export async function bootstrap(): Promise<{
   const issuerProfileService = createIssuerProfileService(dataSource, logger);
   // Issue #781 — registered invoice documents are soft-deleted on withdrawal.
   const invoiceDocumentService = createInvoiceDocumentService(dataSource, logger);
+  const invoiceCacheService = createInvoiceCacheService({
+    redisUrl: config.cache.redisUrl,
+    enabled: config.cache.enabled,
+    listTtlSeconds: config.cache.invoicesListTtlSeconds,
+    detailTtlSeconds: config.cache.invoiceDetailTtlSeconds,
+  });
   const invoiceStateMachine = createInvoiceStateMachine({
     effects: [
+      async ({ invoice }) => invoiceCacheService.invalidateSellerInvoices(invoice.sellerId),
       unlessDispatched(createSellerNotificationEffect(notificationService)),
       createNotificationDispatchEffect(notificationDispatcher),
       issuerProfileService.createSettlementRefreshEffect(),
@@ -226,6 +240,24 @@ export async function bootstrap(): Promise<{
   // limits, the integration ACL, curve migrations, atomic swap history, creator
   // royalty earnings and holder dividend cycles.
   const projections = createOnchainProjections({ dataSource, logger });
+  const dividendReconciliationService = new DividendReconciliationService(dataSource);
+  const payoutReader = new PayoutRpc.Server(sorobanConfig.rpcUrl, {
+    allowHttp: sorobanConfig.rpcUrl.startsWith("http://"),
+  });
+  let reconciliationRunning = false;
+  const reconciliationTimer = setInterval(async () => {
+    if (reconciliationRunning) return;
+    reconciliationRunning = true;
+    try {
+      await dividendReconciliationService.runBatch();
+      await reconcilePayoutOutcomes(dataSource, payoutReader);
+    } catch {
+      logger.error("Dividend reconciliation batch failed");
+    } finally {
+      reconciliationRunning = false;
+    }
+  }, 30_000);
+  reconciliationTimer.unref();
 
   // Issue #539 — gated-content access is answered by reading the holder's
   // on-chain key balance, so the status service reads through Soroban rather
@@ -263,6 +295,16 @@ export async function bootstrap(): Promise<{
   const feeScheduleService = createFeeScheduleService(dataSource, getRedisClient());
 
   // ---- Feature: Secondary Market (fees & royalty settlement: issue #783) ----
+  const secondaryDepthService = new SecondaryDepthService(dataSource, metricsRegistry);
+  let sweepingDepth = false;
+  const depthSweep = setInterval(async () => {
+    if (sweepingDepth) return;
+    sweepingDepth = true;
+    try { await secondaryDepthService.sweep(); }
+    catch (error) { logger.error("Secondary depth sweep failed", { error }); }
+    finally { sweepingDepth = false; }
+  }, DEPTH_SWEEP_INTERVAL_MS);
+  depthSweep.unref();
   const secondaryMarketService = createSecondaryMarketService(dataSource, notificationService, {
     feeSchedule: feeScheduleService,
   });
@@ -287,6 +329,7 @@ export async function bootstrap(): Promise<{
     authService,
     notificationService,
     invoiceService,
+    invoiceCacheService,
     investmentService,
     settlementService,
     adminSettlementService,
@@ -298,6 +341,9 @@ export async function bootstrap(): Promise<{
     dividendCycleService,
     dividendDistributionService: projections.dividendDistributionService,
     royaltyEarningsService: projections.royaltyEarningsService,
+    payoutClaimsService: new PayoutClaimsService(dataSource),
+    dividendReconciliationService,
+    royaltyStatementsService: new RoyaltyStatementsService(dataSource),
     subscriptionStatusService,
     onboardingService,
     swapService: projections.swapService,
@@ -306,6 +352,7 @@ export async function bootstrap(): Promise<{
     curveMigrationService: projections.curveMigrationService,
     keyMergeProposalService: projections.keyMergeProposalService,
     secondaryMarketService,
+    secondaryDepthService,
     watchlistService,
     settlementWorker,
     invoiceEscrowContractService: invoiceEscrowContract,
@@ -313,7 +360,7 @@ export async function bootstrap(): Promise<{
     issuerReputationService,
     issuerProfileService,
     invoiceDocumentService,
-    documentExportService,
+    invoiceUploadService: new InvoiceUploadService(dataSource, ipfsService),
     investorRiskProfileService,
     draftService,
     waitlistService,
@@ -330,8 +377,11 @@ export async function bootstrap(): Promise<{
   const server = app.listen(config.port, () => {
     logger.info("Server running", { port: config.port });
   });
-  server.on("close", () => eventIndexer?.stop());
-  server.on("close", () => documentExportCleanup.stop());
+  server.on("close", () => {
+    eventIndexer?.stop();
+    clearInterval(reconciliationTimer);
+    clearInterval(depthSweep);
+  });
 
   // Settlement outcomes for notification dispatch; the state machine effects
   // above already notify sellers and investors of each status change.
@@ -355,7 +405,10 @@ export async function bootstrap(): Promise<{
     createNotificationService(dataSource),
     logger
   );
-  const subscriptionExpiryScheduler = scheduleSubscriptionExpiryJob(subscriptionExpiryNotifier, logger);
+  const subscriptionExpiryScheduler = scheduleSubscriptionExpiryJob(
+    subscriptionExpiryNotifier,
+    logger
+  );
 
   // ---- Start settlement worker cron (hourly) ----
   settlementWorker.start("0 * * * *");
@@ -408,6 +461,7 @@ export async function bootstrap(): Promise<{
   pendingStellarConfirmationWorker?.start();
 
   server.on("close", () => {
+    void invoiceCacheService.disconnect();
     if (eventIndexer) {
       eventIndexer.stop();
     }

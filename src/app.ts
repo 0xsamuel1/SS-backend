@@ -1,3 +1,7 @@
+import type { PayoutClaimsService } from "./services/payout-claims.service";
+import type { DividendReconciliationService } from "./services/dividend-reconciliation.service";
+import type { RoyaltyStatementsService } from "./services/royalty-statements.service";
+import type { InvoiceCacheService } from "./services/invoice-cache.service";
 import cors from "cors";
 import helmet from "helmet";
 import express, { Request } from "express";
@@ -9,6 +13,8 @@ import { sanitizeInputMiddleware } from "./middleware/sanitize-input.middleware"
 
 import { logger, type AppLogger } from "./observability/logger";
 import { getMetricsContentType, MetricsRegistry } from "./observability/metrics";
+import { setReliabilityMetricsRegistry } from "./observability/reliability-metrics";
+import { setSettlementMetricsRegistry } from "./lib/settlement-metrics";
 
 import { randomUUID } from "crypto";
 
@@ -52,14 +58,15 @@ import { createOnboardingRouter } from "./routes/onboarding.routes";
 import { createCommunityProgramsRouter } from "./routes/community-programs.routes";
 import { createIssuerReputationRouter } from "./routes/issuer-reputation.routes";
 import { createIssuerProfileRouter } from "./routes/issuer-profile.routes";
+import { createSecondaryDepthRouter } from "./routes/secondary-depth.routes";
+import type { SecondaryDepthService } from "./services/secondary-depth.service";
+import { createInvoiceUploadsRouter } from "./routes/invoice-uploads.routes";
+import type { InvoiceUploadService } from "./services/invoice-upload.service";
 import { createInvoiceDocumentsRouter } from "./routes/invoice-documents.routes";
 import { createDocumentExportRouter } from "./routes/document-export.routes";
 import { createOnchainEventViewsRouter } from "./routes/onchain-event-views.routes";
 import { createFxRouter } from "./routes/fx.routes";
-import {
-  createBenchmarkRouter,
-  createInvoiceBenchmarkRouter,
-} from "./routes/benchmark.routes";
+import { createBenchmarkRouter, createInvoiceBenchmarkRouter } from "./routes/benchmark.routes";
 import { createReferralTierRouter } from "./routes/referral-tier.routes";
 import { createYieldBoostRouter } from "./routes/yield-boost.routes";
 import {
@@ -208,6 +215,7 @@ export interface AppDependencies {
   authService: AuthService;
   notificationService?: NotificationService;
   invoiceService?: InvoiceService;
+  invoiceCacheService?: InvoiceCacheService;
   investmentService?: InvestmentService;
   settlementService?: SettlementService;
   adminSettlementService?: AdminSettlementService;
@@ -222,6 +230,9 @@ export interface AppDependencies {
   dividendCycleService?: DividendCycleService;
   dividendDistributionService?: DividendDistributionService;
   royaltyEarningsService?: RoyaltyEarningsService;
+  payoutClaimsService?: PayoutClaimsService;
+  dividendReconciliationService?: DividendReconciliationService;
+  royaltyStatementsService?: RoyaltyStatementsService;
   subscriptionStatusService?: SubscriptionStatusService;
   onboardingService?: OnboardingService;
   swapService?: AtomicSwapService;
@@ -230,6 +241,7 @@ export interface AppDependencies {
   curveMigrationService?: CurveMigrationService;
   keyMergeProposalService?: KeyMergeProposalService;
   secondaryMarketService?: SecondaryMarketService;
+  secondaryDepthService?: SecondaryDepthService;
   watchlistService?: WatchlistService;
   settlementWorker?: SettlementWorker;
   acknowledgementService?: InvestorAcknowledgementService;
@@ -242,8 +254,7 @@ export interface AppDependencies {
   issuerProfileService?: IssuerProfileService;
   /** Issue #781 — invoice document registration by IPFS CID. */
   invoiceDocumentService?: InvoiceDocumentService;
-  /** Issues #706-#708 — durable invoice document export jobs. */
-  documentExportService?: DocumentExportService;
+  invoiceUploadService?: InvoiceUploadService;
   investorRiskProfileService?: InvestorRiskProfileService;
   draftService?: InvoiceDraftService;
   invoiceEscrowContractService?: import("./services/stellar/invoice-escrow-contract.service").InvoiceEscrowContractService;
@@ -278,6 +289,7 @@ export function createApp({
   authService,
   notificationService,
   invoiceService,
+  invoiceCacheService,
   investmentService,
   settlementService,
   adminSettlementService,
@@ -291,6 +303,9 @@ export function createApp({
   dividendCycleService,
   dividendDistributionService,
   royaltyEarningsService,
+  payoutClaimsService,
+  dividendReconciliationService,
+  royaltyStatementsService,
   subscriptionStatusService,
   onboardingService,
   swapService,
@@ -299,6 +314,7 @@ export function createApp({
   curveMigrationService,
   keyMergeProposalService,
   secondaryMarketService,
+  secondaryDepthService,
   watchlistService,
   settlementWorker,
   acknowledgementService,
@@ -309,7 +325,7 @@ export function createApp({
   issuerReputationService,
   issuerProfileService,
   invoiceDocumentService,
-  documentExportService,
+  invoiceUploadService,
   investorRiskProfileService,
   draftService,
   invoiceEscrowContractService,
@@ -327,6 +343,8 @@ export function createApp({
   http,
 }: AppDependencies) {
   const app = express();
+  setSettlementMetricsRegistry(metricsRegistry);
+  setReliabilityMetricsRegistry(metricsRegistry);
 
   // ✅ FIX TRUST PROXY
   if (http?.trustProxy !== undefined) {
@@ -492,6 +510,7 @@ export function createApp({
   if (invoiceService && config) {
     const invoiceRouter = createInvoiceRouter({
       invoiceService,
+      cacheService: invoiceCacheService,
       config,
       investmentService,
       authService,
@@ -504,6 +523,12 @@ export function createApp({
     });
     app.use("/api/v1/invoices", invoiceRouter);
     app.use("/invoices", invoiceRouter);
+  }
+
+  if (invoiceUploadService) {
+    const uploads = createInvoiceUploadsRouter(invoiceUploadService, authService);
+    app.use("/api/v1/invoices", uploads);
+    app.use("/invoices", uploads);
   }
 
   // Issue #781 — invoice document registration and retrieval
@@ -579,6 +604,12 @@ export function createApp({
     app.use("/seller", createSellerRouter({ sellerService, authService }));
   }
 
+  if (secondaryDepthService) {
+    const depth = createSecondaryDepthRouter(secondaryDepthService);
+    app.use("/api/v1/secondary-market", depth);
+    app.use("/api/v1/secondary", depth);
+  }
+
   if (secondaryMarketService && authService) {
     const secondaryMarketRouter = createSecondaryMarketRouter({
       secondaryMarketService,
@@ -621,13 +652,13 @@ export function createApp({
   if (dividendCycleService) {
     app.use(
       "/api/v1/dividends",
-      createDividendsRouter({ dividendCycleService, authService, dividendDistributionService })
+      createDividendsRouter({ dividendCycleService, authService, dividendDistributionService, payoutClaimsService, dividendReconciliationService })
     );
   }
 
   // ---- Royalties: creator earnings and claim history (issue #537) ----
   if (royaltyEarningsService) {
-    app.use("/api/v1/royalties", createRoyaltiesRouter({ royaltyEarningsService, authService }));
+    app.use("/api/v1/royalties", createRoyaltiesRouter({ royaltyEarningsService, authService, payoutClaimsService, royaltyStatementsService }));
   }
 
   // ---- Subscriptions: gated-content access check (issue #539) ----

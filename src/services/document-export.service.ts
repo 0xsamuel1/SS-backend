@@ -13,19 +13,33 @@ import { ServiceError } from "../utils/service-error";
 import { logger, type AppLogger } from "../observability/logger";
 import type { IPFSService } from "./ipfs.service";
 import { createSignedDownloadToken, verifySignedDownloadToken } from "../lib/signed-url";
+import {
+  advanceProgress,
+  canTransitionExportState,
+  isTerminalExportState,
+  progressForDocuments,
+  type ExportJobState,
+} from "./export-job-state";
 
-export type ExportJobStatus = DocumentExportJobStatus;
+export type ExportJobStatus = ExportJobState;
 
 export interface ExportJob {
   id: string;
   invoiceId: string;
+  /** User who requested the export; the only user who may inspect or cancel it. */
+  requestedBy: string;
   status: ExportJobStatus;
+  /** 0-100, never decreases, 100 only once the job is completed. */
+  progress: number;
+  totalDocuments: number;
+  processedDocuments: number;
   zipPath?: string;
   downloadToken?: string;
   downloadTokenExpiresAt?: number;
   error?: string;
   createdAt: number;
   completedAt?: number;
+  cancelledAt?: number;
 }
 
 export interface DocumentExportServiceDependencies {
@@ -109,55 +123,82 @@ export class DocumentExportService {
     const job = this.jobs.create({
       id: jobId,
       invoiceId,
-      requesterId: requestingUserId,
-      status: "processing",
-      zipPath: this.archivePath(jobId),
-      downloadToken: null,
-      downloadTokenExpiresAt: null,
-      error: null,
-      leaseOwner: this.ownerId,
-      leaseExpiresAt: new Date(now.getTime() + PROCESSING_LEASE_MS),
-      expiresAt: null,
-      completedAt: null,
+
+      requestedBy: requestingUserId,
+      status: "queued",
+      progress: 0,
+      totalDocuments: 0,
+      processedDocuments: 0,
+      createdAt: Date.now(),
+    };
+    this.jobs.set(jobId, job);
+
+    // Fire-and-forget: the caller polls `getJobStatus`, it does not await this.
+    // Starting on the next turn of the event loop leaves the job observably
+    // `queued` (and cancellable before any work happens) when this returns.
+    setImmediate(() => {
+      void this.runExport(job, invoice.invoiceNumber);
     });
-    await this.jobs.save(job);
 
     void this.runExport(jobId, invoice.invoiceNumber, this.ownerId);
     return { jobId };
   }
 
-  async getJobStatus(jobId: string): Promise<ExportJob | undefined> {
-    let job = await this.jobs.findOneBy({ id: jobId });
-    if (!job) return undefined;
+  /**
+   * Returns the job only to the user who requested it. Any other caller gets
+   * `undefined`, the same answer as an unknown id, so job ids cannot be probed.
+   */
+  getJobStatus(jobId: string, requestingUserId: string): ExportJob | undefined {
+    const job = this.jobs.get(jobId);
+    if (!job || job.requestedBy !== requestingUserId) return undefined;
+    return job;
+  }
 
-    if (
-      job.status === "processing" &&
-      job.leaseExpiresAt &&
-      job.leaseExpiresAt.getTime() <= Date.now()
-    ) {
-      await this.removeArchive(job);
-      const failed = await this.jobs.update(
-        {
-          id: job.id,
-          status: "processing",
-          leaseExpiresAt: LessThanOrEqual(new Date()),
-        },
-        {
-          status: "failed",
-          error: "Export worker lease expired before completion",
-          completedAt: new Date(),
-          expiresAt: new Date(Date.now() + this.retentionMs),
-          leaseOwner: null,
-          leaseExpiresAt: null,
-        },
+  /**
+   * Cancels a queued or running job (#808).
+   *
+   * Idempotent: cancelling an already-cancelled job returns it unchanged. A job
+   * that has completed or failed cannot be cancelled (409). Not-found and
+   * not-yours look identical (404). The transition is checked and applied in
+   * one synchronous step, so it cannot interleave with the export finishing:
+   * whichever lands first wins and the other sees the new state.
+   */
+  cancelJob(jobId: string, requestingUserId: string): ExportJob {
+    const job = this.getJobStatus(jobId, requestingUserId);
+    if (!job) {
+      throw new ServiceError("export_job_not_found", "Export job not found", 404);
+    }
+    if (job.status === "cancelled") return job;
+    if (!canTransitionExportState(job.status, "cancelled")) {
+      throw new ServiceError(
+        "export_not_cancellable",
+        `A ${job.status} export job cannot be cancelled`,
+        409,
       );
-      if (failed.affected) {
-        job = await this.jobs.findOneBy({ id: jobId });
-        if (!job) return undefined;
-      }
     }
 
-    return toExportJob(job);
+    job.status = "cancelled";
+    job.cancelledAt = Date.now();
+    job.completedAt = job.cancelledAt;
+    // A cancelled job never offers a download.
+    delete job.downloadToken;
+    delete job.downloadTokenExpiresAt;
+    if (job.zipPath) {
+      void fs.rm(job.zipPath, { force: true }).catch(() => undefined);
+      delete job.zipPath;
+    }
+    return job;
+  }
+
+  private transition(job: ExportJob, to: ExportJobStatus): boolean {
+    if (!canTransitionExportState(job.status, to)) return false;
+    job.status = to;
+    return true;
+  }
+
+  private setProgress(job: ExportJob, value: number): void {
+    if (isTerminalExportState(job.status)) return;
+    job.progress = advanceProgress(job.progress, value);
   }
 
   async getDownloadPath(jobId: string, token: string): Promise<string> {
@@ -265,135 +306,60 @@ export class DocumentExportService {
     }
   }
 
-  private archivePath(jobId: string): string {
-    return path.join(path.resolve(this.dependencies.tempDir), `${jobId}.zip`);
-  }
-
-  private async removeArchive(job: DocumentExportJob): Promise<boolean> {
-    if (!job.zipPath) return false;
-    const resolved = path.resolve(job.zipPath);
-    const tempDir = path.resolve(this.dependencies.tempDir);
-    if (!resolved.startsWith(`${tempDir}${path.sep}`)) {
-      throw new Error(`Export archive path is outside the configured shared directory: ${resolved}`);
-    }
-    try {
-      await fs.stat(resolved);
-      await fs.rm(resolved, { force: true });
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      this.appLogger.error("document_export.archive_cleanup.failed", {
-        job_id: job.id,
-        path: resolved,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    }
-  }
-
-  private async renewLease(jobId: string, leaseOwner: string): Promise<boolean> {
-    const result = await this.jobs.update(
-      { id: jobId, status: "processing", leaseOwner },
-      { leaseExpiresAt: new Date(Date.now() + PROCESSING_LEASE_MS) },
-    );
-    return Boolean(result.affected);
-  }
-
-  private async runExport(jobId: string, invoiceNumber: string, leaseOwner: string): Promise<void> {
-    const job = await this.jobs.findOneBy({ id: jobId });
-    if (!job) return;
-    let leaseLost = false;
-    let leaseError: unknown;
-    const heartbeat = setInterval(() => {
-      void this.renewLease(jobId, leaseOwner).then((renewed) => {
-        if (!renewed) leaseLost = true;
-      }).catch((error: unknown) => {
-        leaseError = error;
-        this.appLogger.error("document_export.lease_renewal.failed", {
-          job_id: jobId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }, LEASE_RENEWAL_INTERVAL_MS);
-    heartbeat.unref();
+  private async runExport(job: ExportJob, invoiceNumber: string): Promise<void> {
+    // The job may have been cancelled between being queued and starting.
+    if (!this.transition(job, "running")) return;
 
     try {
       const documents = await this.dependencies.dataSource
         .getRepository(InvoiceDocument)
         .find({ where: { invoiceId: job.invoiceId }, order: { createdAt: "ASC" } });
+      if (job.status !== "running") return;
 
       if (documents.length === 0) {
         throw new ServiceError("no_documents", "This invoice has no documents to export", 404);
       }
+      job.totalDocuments = documents.length;
 
       await fs.mkdir(this.dependencies.tempDir, { recursive: true });
-      await this.writeZip(job.zipPath!, job.invoiceId, invoiceNumber, documents, async () => {
-        if (leaseLost || leaseError) {
-          throw leaseError instanceof Error ? leaseError : new Error("Export worker lease was lost");
-        }
-        if (!(await this.renewLease(jobId, leaseOwner))) {
-          leaseLost = true;
-          throw new Error("Export worker lease was lost");
-        }
-      });
+      const zipPath = path.join(this.dependencies.tempDir, `${job.id}.zip`);
+
+      await this.writeZip(zipPath, job, invoiceNumber, documents);
+
+      // Cancelled while the archive was being written: discard the file and
+      // leave the job cancelled instead of overwriting that with "completed".
+      if (job.status !== "running") {
+        await fs.rm(zipPath, { force: true }).catch(() => undefined);
+        return;
+      }
 
       const { token, expiresAt } = createSignedDownloadToken(
         this.dependencies.signingSecret,
         jobId,
         this.dependencies.urlTtlMinutes,
       );
-      const completedAt = new Date();
-      const saved = await this.jobs.update(
-        { id: jobId, status: "processing", leaseOwner },
-        {
-          status: "completed",
-          downloadToken: token,
-          downloadTokenExpiresAt: new Date(expiresAt),
-          completedAt,
-          expiresAt: new Date(Math.max(expiresAt, completedAt.getTime() + this.retentionMs)),
-          leaseOwner: null,
-          leaseExpiresAt: null,
-        },
-      );
-      if (!saved.affected) throw new Error("Export worker no longer owns this job");
+
+      if (!this.transition(job, "completed")) return;
+      job.progress = 100;
+      job.zipPath = zipPath;
+      job.downloadToken = token;
+      job.downloadTokenExpiresAt = expiresAt;
+      job.completedAt = Date.now();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      try {
-        await this.removeArchive(job);
-        const failed = await this.jobs.update(
-          { id: jobId, status: "processing", leaseOwner },
-          {
-            status: "failed",
-            error: message,
-            completedAt: new Date(),
-            expiresAt: new Date(Date.now() + this.retentionMs),
-            leaseOwner: null,
-            leaseExpiresAt: null,
-          },
-        );
-        if (!failed.affected) {
-          throw new Error("Export worker no longer owns this job");
-        }
-      } catch (failureError) {
-        this.appLogger.error("document_export.failure_persistence.failed", {
-          job_id: jobId,
-          error: failureError instanceof Error ? failureError.message : String(failureError),
-          original_error: message,
-        });
-      }
-      this.appLogger.error("document_export.job.failed", { job_id: jobId, error: message });
-    } finally {
-      clearInterval(heartbeat);
+      if (!this.transition(job, "failed")) return;
+      job.error = error instanceof Error ? error.message : "Unknown error";
+      job.completedAt = Date.now();
     }
   }
 
   private async writeZip(
     zipPath: string,
-    invoiceId: string,
+    job: ExportJob,
     invoiceNumber: string,
     documents: InvoiceDocument[],
     renewLease: () => Promise<void>,
   ): Promise<void> {
+    const invoiceId = job.invoiceId;
     const output = createWriteStream(zipPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
     let finalized = false;
@@ -408,17 +374,11 @@ export class DocumentExportService {
     });
     void completion.catch(() => undefined);
 
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      rejectCompletion(error);
-    };
-    const completeIfReady = () => {
-      if (!settled && closed && finalized && output.writableFinished) {
-        settled = true;
-        resolveCompletion();
-      }
-    };
+    for (const doc of documents) {
+      // Stop fetching as soon as the job is cancelled.
+      if (job.status !== "running") break;
+
+      const fileBuffer = await this.dependencies.ipfsService.fetchFile(doc.cid);
 
     output.on("error", fail);
     output.on("close", () => {
@@ -454,18 +414,10 @@ export class DocumentExportService {
         archive.append(fileBuffer, { name: entryName });
       }
 
-      await archive.finalize();
-      finalized = true;
-      completeIfReady();
-      await completion;
-    } catch (error) {
-      archive.abort();
-      const closed = output.closed
-        ? Promise.resolve()
-        : new Promise<void>((resolve) => output.once("close", resolve));
-      output.destroy();
-      await closed;
-      throw error;
+      archive.append(fileBuffer, { name: entryName });
+
+      job.processedDocuments += 1;
+      this.setProgress(job, progressForDocuments(job.processedDocuments, documents.length));
     }
   }
 }
