@@ -40,6 +40,7 @@ import { createKeysRouter } from "./routes/keys.routes";
 import { createDividendsRouter } from "./routes/dividends.routes";
 import { createSecondaryMarketRouter } from "./routes/secondary-market.routes";
 import { createWatchlistRouter } from "./routes/watchlist.routes";
+import { createInvestorInsightsRouter } from "./routes/investor-insights.routes";
 import type { RatingsLeaderboardService } from "./services/ratings-leaderboard.service";
 import type { DividendCycleService } from "./services/dividend-cycle.service";
 import type { DividendDistributionService } from "./services/dividend-distribution.service";
@@ -91,6 +92,7 @@ import type { AdminMetricsService } from "./services/admin-metrics.service";
 import type { PortfolioService } from "./services/portfolio.service";
 import type { SecondaryMarketService } from "./services/secondary-market.service";
 import type { WatchlistService } from "./services/watchlist.service";
+import type { InvestorInsightsService } from "./services/investor-insights.service";
 import type { SettlementWorker } from "./workers/settlement.worker";
 import type { FeeScheduleService } from "./services/fee-schedule.service";
 import type { IssuerReputationService } from "./services/issuer-reputation.service";
@@ -254,6 +256,8 @@ export interface AppDependencies {
   secondaryMarketService?: SecondaryMarketService;
   secondaryDepthService?: SecondaryDepthService;
   watchlistService?: WatchlistService;
+  /** Issue #811 — alert preferences (read/update) and render-only preview. */
+  investorInsightsService?: InvestorInsightsService;
   settlementWorker?: SettlementWorker;
   acknowledgementService?: InvestorAcknowledgementService;
   extensionService?: InvoiceExtensionService;
@@ -329,6 +333,7 @@ export function createApp({
   secondaryMarketService,
   secondaryDepthService,
   watchlistService,
+  investorInsightsService,
   settlementWorker,
   acknowledgementService,
   portfolioService,
@@ -679,6 +684,10 @@ export function createApp({
     app.use("/api/v1/secondary-market", secondaryMarketRouter);
     app.use("/secondary-market", secondaryMarketRouter);
     app.use("/api/v1/secondary", secondaryMarketRouter);
+  }
+
+  if (investorInsightsService && authService) {
+    app.use("/api/v1/investors", createInvestorInsightsRouter(investorInsightsService, authService));
   }
 
   if (watchlistService && authService) {

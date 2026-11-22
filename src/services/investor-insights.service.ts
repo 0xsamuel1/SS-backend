@@ -6,18 +6,65 @@ import { Investment } from "../models/Investment.model";
 import type { AppLogger } from "../observability/logger";
 import { logger as globalLogger } from "../observability/logger";
 import type { DecodedSorobanEvent } from "../types/soroban.types";
-import { HttpError } from "../utils/http-error";
+import { HttpError, PublicAppError } from "../utils/http-error";
 import { Address, SorobanRpc, nativeToScVal, scValToNative, xdr } from "stellar-sdk";
+import {
+  ALERT_EVENTS,
+  ALERT_VARIABLE_CONTRACT,
+  DEFAULT_ALERT_CHANNELS,
+  isSupportedPair,
+  previewNotification,
+  renderNotification,
+  validateAlertPreferenceUpdate,
+  validatePreviewRequest,
+  type AlertEvent,
+  type NotificationChannel,
+  type NotificationPreview,
+  type RenderedNotification,
+} from "../lib/notification-templates";
 
 const ONBOARDING_CACHE_TTL_MS = 60_000;
 const YIELD_CACHE_TTL_MS = 5 * 60_000;
 
-type AlertKind =
-  | "settlement"
-  | "kyc_expiry"
-  | "watchlist_change"
-  | "auto_invest"
-  | "maturity";
+type AlertKind = AlertEvent;
+
+/** Boolean column backing each event's on/off switch. */
+const ENABLED_COLUMN: Record<
+  AlertEvent,
+  "settlementEnabled" | "kycExpiryEnabled" | "watchlistChangeEnabled" | "autoInvestEnabled" | "maturityEnabled"
+> = {
+  settlement: "settlementEnabled",
+  kyc_expiry: "kycExpiryEnabled",
+  watchlist_change: "watchlistChangeEnabled",
+  auto_invest: "autoInvestEnabled",
+  maturity: "maturityEnabled",
+};
+
+/**
+ * Event-data aliases for each contract variable, in priority order. Keys
+ * must match ALERT_VARIABLE_CONTRACT; the contract tests enforce this.
+ */
+export const ALERT_VARIABLE_ALIASES: Record<AlertEvent, Record<string, string[]>> = {
+  settlement: {
+    invoice_id: ["invoice_id", "invoice"],
+    amount: ["amount", "settled_amount", "payment_amount", "payout"],
+  },
+  kyc_expiry: {
+    wallet: [],
+    expires_at: ["expires_at", "expiry", "expiry_date", "expiration"],
+  },
+  watchlist_change: {
+    invoice_id: ["invoice_id", "invoice"],
+    change: ["change", "change_type", "status", "reason"],
+  },
+  auto_invest: {
+    invoice_id: ["invoice_id", "invoice"],
+    amount: ["amount", "invested_amount", "investment_amount"],
+  },
+  maturity: {
+    invoice_id: ["invoice_id", "invoice"],
+  },
+};
 
 export interface OnboardingBonusStatus {
   is_claimed: boolean;
@@ -32,6 +79,24 @@ export interface AlertPreferencesView {
   watchlist_change: boolean;
   auto_invest: boolean;
   maturity: boolean;
+  /** Delivery channels per event; always a registered, non-empty set. */
+  channels: Record<AlertEvent, NotificationChannel[]>;
+}
+
+/**
+ * Resolve the stored channel map to a complete one. Events without a stored
+ * choice get the defaults, and any pair no longer in the registry is dropped
+ * so delivery never attempts an unsupported combination.
+ */
+function resolveChannels(
+  stored: Partial<Record<AlertEvent, NotificationChannel[]>> | null | undefined
+): Record<AlertEvent, NotificationChannel[]> {
+  const resolved = {} as Record<AlertEvent, NotificationChannel[]>;
+  for (const event of ALERT_EVENTS) {
+    const chosen = (stored?.[event] ?? []).filter((channel) => isSupportedPair(event, channel));
+    resolved[event] = chosen.length > 0 ? chosen : [...DEFAULT_ALERT_CHANNELS];
+  }
+  return resolved;
 }
 
 export interface YieldAdjustmentView {
@@ -94,7 +159,7 @@ function normalizeTopic(topic: string): string {
   return topic.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
-function preferenceFor(kind: AlertKind): keyof AlertPreferencesView {
+function preferenceFor(kind: AlertKind): AlertEvent {
   return kind;
 }
 
@@ -118,6 +183,34 @@ function detectAlertKind(topic: string): AlertKind | null {
   if (normalized.includes("autoinvest")) return "auto_invest";
   if (normalized.includes("maturity") || normalized.includes("matured")) return "maturity";
   return null;
+}
+
+/**
+ * Extract the delivery variable contract for an event from its data. Only
+ * named fields are read (no positional fallbacks), so a variable is either
+ * genuinely present or left for the contract fallback.
+ */
+export function alertVariablesFromEvent(
+  kind: AlertKind,
+  data: Record<string, unknown>,
+  wallet: string,
+): Record<string, string> {
+  const variables: Record<string, string> = {};
+  for (const name of Object.keys(ALERT_VARIABLE_CONTRACT[kind])) {
+    if (name === "wallet") {
+      variables.wallet = wallet;
+      continue;
+    }
+    for (const alias of ALERT_VARIABLE_ALIASES[kind][name] ?? []) {
+      const camel = alias.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+      const value = scalarString(data[alias] ?? data[camel]);
+      if (value !== null && value.trim() !== "") {
+        variables[name] = value;
+        break;
+      }
+    }
+  }
+  return variables;
 }
 
 export class InvestorInsightsService {
@@ -171,10 +264,74 @@ export class InvestorInsightsService {
           watchlist_change: preferences.watchlistChangeEnabled,
           auto_invest: preferences.autoInvestEnabled,
           maturity: preferences.maturityEnabled,
+          channels: resolveChannels(preferences.channels),
         }
-      : { settlement: true, kyc_expiry: true, watchlist_change: true, auto_invest: true, maturity: true };
+      : {
+          settlement: true,
+          kyc_expiry: true,
+          watchlist_change: true,
+          auto_invest: true,
+          maturity: true,
+          channels: resolveChannels(null),
+        };
     this.writeCache(this.preferenceCache, wallet, view, ONBOARDING_CACHE_TTL_MS);
     return view;
+  }
+
+  /**
+   * Partially update a wallet's alert preferences (issue #811). Every
+   * requested (event, channel) pair is checked against the template
+   * registry first; any unsupported or malformed selection rejects the
+   * whole request with per-field errors and nothing is written.
+   */
+  async updateAlertPreferences(wallet: string, input: unknown): Promise<AlertPreferencesView> {
+    const result = validateAlertPreferenceUpdate(input);
+    if (!result.ok) {
+      throw new PublicAppError(422, "Invalid alert preferences.", "VALIDATION_ERROR", result.errors);
+    }
+
+    const repository = this.dataSource.getRepository(AlertPreference);
+    const existing = await repository.findOne({ where: { wallet } });
+    const channels: Partial<Record<AlertEvent, NotificationChannel[]>> = {
+      ...(existing?.channels ?? {}),
+    };
+    const enabled: Partial<Record<(typeof ENABLED_COLUMN)[AlertEvent], boolean>> = {};
+    for (const [event, change] of Object.entries(result.value) as Array<
+      [AlertEvent, { enabled?: boolean; channels?: NotificationChannel[] }]
+    >) {
+      if (change.enabled !== undefined) enabled[ENABLED_COLUMN[event]] = change.enabled;
+      if (change.channels !== undefined) channels[event] = change.channels;
+    }
+
+    // New rows spell out every switch rather than leaning on column
+    // defaults, so the saved entity (and the cache built from it) is complete.
+    const defaults = Object.fromEntries(
+      Object.values(ENABLED_COLUMN).map((column) => [column, true])
+    );
+    await repository.save(
+      repository.create({
+        ...defaults,
+        ...(existing ?? {}),
+        wallet,
+        ...enabled,
+        channels,
+      })
+    );
+    this.preferenceCache.delete(wallet);
+    return this.getAlertPreferences(wallet);
+  }
+
+  /**
+   * Render a preview for one (event, channel) pair. Pure: it uses only the
+   * template registry and never touches the notification transport, so a
+   * preview cannot be delivered.
+   */
+  previewAlert(input: unknown): NotificationPreview {
+    const result = validatePreviewRequest(input);
+    if (!result.ok) {
+      throw new PublicAppError(422, "Invalid preview request.", "VALIDATION_ERROR", result.errors);
+    }
+    return previewNotification(result.value);
   }
 
   async getYieldAdjustment(invoiceId: string): Promise<YieldAdjustmentView> {
@@ -403,6 +560,8 @@ export class InvestorInsightsService {
     await Promise.all([...new Set(wallets)].map(async (wallet) => {
       const preferences = await this.getAlertPreferences(wallet);
       if (!preferences[preferenceFor(kind)]) return;
+      const rendered = this.renderForDelivery(kind, preferences.channels[kind], data, wallet, event.id);
+      if (rendered.length === 0) return;
       try {
         const response = await this.request(notificationServiceUrl, {
           method: "POST",
@@ -423,6 +582,8 @@ export class InvestorInsightsService {
               ledger: event.ledger,
               data: event.data,
             },
+            channels: rendered.map((message) => message.channel),
+            rendered,
           }),
           signal: AbortSignal.timeout(4_500),
         });
@@ -438,6 +599,36 @@ export class InvestorInsightsService {
         throw error;
       }
     }));
+  }
+
+  /**
+   * Build the contract variables for one recipient and render each chosen
+   * channel through the shared registry renderer, the same one preview uses.
+   * A channel that cannot render (a required variable is absent from the
+   * event) is logged and skipped so the other channels still deliver.
+   */
+  private renderForDelivery(
+    kind: AlertKind,
+    channels: NotificationChannel[],
+    data: Record<string, unknown>,
+    wallet: string,
+    eventId: string,
+  ): RenderedNotification[] {
+    const variables = alertVariablesFromEvent(kind, data, wallet);
+    const rendered: RenderedNotification[] = [];
+    for (const channel of channels) {
+      try {
+        rendered.push(renderNotification(kind, channel, variables));
+      } catch (error) {
+        this.logger.error("Investor alert render failed", {
+          eventId,
+          eventType: kind,
+          channel,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return rendered;
   }
 
   private booleanPreference(
