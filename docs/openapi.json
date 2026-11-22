@@ -2700,6 +2700,7 @@
     "/api/v1/watchlist/{invoiceId}": {
       "post": {
         "summary": "Add an invoice to the watchlist",
+        "description": "Idempotent. Repeating the request never creates a duplicate entry or returns a uniqueness error. Returns 201 when this request created the entry and 200 when it already existed; both carry the final entry and meta.created. Existing notes are not overwritten.",
         "security": [
           {
             "bearerAuth": []
@@ -2711,11 +2712,22 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
         "responses": {
+          "200": {
+            "description": "Already in the watchlist; returns the existing entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
           "201": {
             "description": "Added",
             "content": {
@@ -2726,13 +2738,23 @@
               }
             }
           },
+          "400": {
+            "description": "invoiceId is not a valid UUID"
+          },
           "401": {
             "description": "Authentication required"
+          },
+          "404": {
+            "description": "Invoice not found"
+          },
+          "409": {
+            "description": "A concurrent remove deleted the entry mid-request; safe to retry"
           }
         }
       },
       "delete": {
         "summary": "Remove an invoice from the watchlist",
+        "description": "Idempotent. Returns 204 whether or not the entry existed, since the final state (absent) is the same.",
         "security": [
           {
             "bearerAuth": []
@@ -2744,13 +2766,17 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
         "responses": {
           "204": {
-            "description": "Removed"
+            "description": "Removed, or was already absent"
+          },
+          "400": {
+            "description": "invoiceId is not a valid UUID"
           },
           "401": {
             "description": "Authentication required"
