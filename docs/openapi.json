@@ -2860,6 +2860,24 @@
         }
       }
     },
+    "/health/live": {
+      "get": {
+        "summary": "Liveness probe",
+        "description": "Reports that the process is running. Does not check dependencies; use /ready for that.",
+        "responses": {
+          "200": {
+            "description": "Process is alive; returns status, timestamp and uptimeSeconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ready": {
       "get": {
         "summary": "Readiness probe",
