@@ -7,6 +7,7 @@ import type { AppLogger } from "../observability/logger";
 import { logger as globalLogger } from "../observability/logger";
 import type { DecodedSorobanEvent } from "../types/soroban.types";
 import { HttpError, PublicAppError } from "../utils/http-error";
+import { InvalidLedgerTimeError, parseLedgerTime, processingLagMs } from "../lib/ledger-time";
 import { Address, SorobanRpc, nativeToScVal, scValToNative, xdr } from "stellar-sdk";
 import {
   ALERT_EVENTS,
@@ -104,7 +105,12 @@ export interface YieldAdjustmentView {
   adjustment_bps: number;
   basis_rating: string | null;
   adjusted_yield: string | null;
+  /** Ledger close time of the settlement event; the time history is ordered by. */
   settled_at: string | null;
+  /** When the settlement was first projected; null for legacy rows. */
+  processed_at: string | null;
+  /** processed_at - settled_at in milliseconds; null when either is unknown. */
+  processing_lag_ms: number | null;
 }
 
 interface CachedValue<T> {
@@ -340,11 +346,21 @@ export class InvestorInsightsService {
 
     const row = await this.dataSource.getRepository(YieldAdjustment).findOne({
       where: { invoiceId },
-      order: { settledAt: "DESC" },
+      // Ledger time, then event id (Soroban paging tokens sort in ledger
+      // order) so settlements in the same ledger second order deterministically.
+      order: { settledAt: "DESC", settlementEventId: "DESC" },
     });
     const view = row
       ? this.toYieldView(row)
-      : { invoice_id: invoiceId, adjustment_bps: 0, basis_rating: null, adjusted_yield: null, settled_at: null };
+      : {
+          invoice_id: invoiceId,
+          adjustment_bps: 0,
+          basis_rating: null,
+          adjusted_yield: null,
+          settled_at: null,
+          processed_at: null,
+          processing_lag_ms: null,
+        };
     this.writeCache(this.currentYieldCache, invoiceId, view, YIELD_CACHE_TTL_MS);
     return view;
   }
@@ -355,7 +371,9 @@ export class InvestorInsightsService {
 
     const rows = await this.dataSource.getRepository(YieldAdjustment).find({
       where: { invoiceId },
-      order: { settledAt: "DESC" },
+      // Ledger time, then event id (Soroban paging tokens sort in ledger
+      // order) so settlements in the same ledger second order deterministically.
+      order: { settledAt: "DESC", settlementEventId: "DESC" },
     });
     const history = rows.map((row) => this.toYieldView(row));
     this.writeCache(this.yieldHistoryCache, invoiceId, history, YIELD_CACHE_TTL_MS);
@@ -503,10 +521,10 @@ export class InvestorInsightsService {
     if (!Number.isInteger(adjustmentBps)) {
       throw new Error(`Settlement event ${eventId} has invalid adjustment basis points.`);
     }
-    const settledAt = new Date(event.ledgerClosedAt);
-    if (Number.isNaN(settledAt.getTime())) {
-      throw new Error(`Settlement event ${eventId} has an invalid ledger timestamp.`);
-    }
+    // The indexer quarantines events with invalid ledger times before they
+    // get here; this guards direct callers. Never fall back to processing time.
+    const ledgerTime = parseLedgerTime(event.ledgerClosedAt);
+    if (!ledgerTime.ok) throw new InvalidLedgerTimeError(eventId, ledgerTime.reason);
     const repository = this.dataSource.getRepository(YieldAdjustment);
     const existing = await repository.findOne({ where: { settlementEventId: eventId } });
     await repository.save(repository.create({
@@ -516,7 +534,10 @@ export class InvestorInsightsService {
       adjustmentBps,
       basisRating: scalarString(basisRatingValue),
       adjustedYield: scalarString(adjustedYieldValue),
-      settledAt,
+      // Issue #812: authoritative timestamps survive replays. settledAt is the
+      // ledger time recorded first; processedAt is the first projection time.
+      settledAt: existing?.settledAt ?? ledgerTime.value,
+      processedAt: existing?.processedAt ?? new Date(),
       transactionHash: event.txHash,
     }));
     this.currentYieldCache.delete(invoiceId);
@@ -649,7 +670,9 @@ export class InvestorInsightsService {
       adjustment_bps: row.adjustmentBps,
       basis_rating: row.basisRating,
       adjusted_yield: row.adjustedYield,
-      settled_at: row.settledAt.toISOString(),
+      settled_at: new Date(row.settledAt).toISOString(),
+      processed_at: row.processedAt ? new Date(row.processedAt).toISOString() : null,
+      processing_lag_ms: processingLagMs(row.settledAt, row.processedAt),
     };
   }
 
