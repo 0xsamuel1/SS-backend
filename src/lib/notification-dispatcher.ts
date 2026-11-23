@@ -1,4 +1,6 @@
+import { randomUUID } from "crypto";
 import { logger as defaultLogger, type AppLogger } from "../observability/logger";
+import { getCorrelationId } from "../observability/request-context";
 import { InvoiceStatus, NotificationType } from "../types/enums";
 import type { Invoice } from "../models/Invoice.model";
 import type { InvestorDirectory } from "./invoice-notifications";
@@ -39,6 +41,8 @@ export type InvoiceEventSubject = Pick<Invoice, "id" | "sellerId" | "invoiceNumb
 
 export interface InvoiceLifecycleEvent {
   kind: InvoiceLifecycleEventKind;
+  /** Optional correlation ID propagated from the originating request. */
+  correlationId?: string;
   invoice: InvoiceEventSubject;
   /** Rejection reason, or other free text shown in the message. */
   reason?: string | null;
@@ -239,12 +243,25 @@ export class NotificationDispatcher {
    * Persists an event and returns once it is durably queued. Returns false when
    * the event is already known (pending, in flight, or dead-lettered).
    */
-  async enqueue(event: InvoiceLifecycleEvent): Promise<boolean> {
+  async enqueue(
+    event: InvoiceLifecycleEvent,
+    correlationId?: string
+  ): Promise<boolean> {
+    const resolvedCorrelationId =
+      correlationId ??
+      event.correlationId ??
+      getCorrelationId?.() ??
+      randomUUID();
+    const eventWithCorrelation: InvoiceLifecycleEvent = {
+      ...event,
+      correlationId: resolvedCorrelationId,
+    };
     const eventId = eventIdFor(event);
     const created = await this.jobs.create({
       eventId,
-      event,
+      event: eventWithCorrelation,
       nextAttemptAt: this.now(),
+      correlationId: resolvedCorrelationId,
     });
     if (!created) return false;
     if (this.autoDispatch) setImmediate(() => void this.pump());
@@ -360,11 +377,13 @@ export class NotificationDispatcher {
 
   private async run(job: NotificationJob): Promise<void> {
     const { eventId, event } = job;
+    const correlationId = job.correlationId ?? event.correlationId;
     try {
       const count = await this.deliver(job);
       const completed = await this.jobs.complete(eventId, this.workerId);
       this.log.info("Dispatched invoice lifecycle notifications.", {
         event_id: eventId,
+        correlation_id: correlationId,
         kind: event.kind,
         invoice_id: event.invoice.id,
         recipient_count: count,
@@ -387,6 +406,7 @@ export class NotificationDispatcher {
         );
         this.log.warn("Notification dispatch failed; retry persisted.", {
           event_id: eventId,
+          correlation_id: correlationId,
           attempt: job.attempts,
           max_attempts: this.maxAttempts,
           next_attempt_at: nextAttemptAt.toISOString(),
@@ -397,6 +417,7 @@ export class NotificationDispatcher {
         if (!persisted) {
           this.log.warn("Retry dropped: this worker no longer owns the job.", {
             event_id: eventId,
+            correlation_id: correlationId,
             worker_id: this.workerId,
           });
         }
@@ -419,6 +440,7 @@ export class NotificationDispatcher {
       );
       this.log.error("Notification dispatch dead-lettered.", {
         event_id: eventId,
+        correlation_id: correlationId,
         kind: event.kind,
         invoice_id: event.invoice.id,
         attempts: job.attempts,
@@ -432,6 +454,7 @@ export class NotificationDispatcher {
       } catch (sinkError) {
         this.log.error("Failed to record notification dead letter.", {
           event_id: eventId,
+          correlation_id: correlationId,
           error: sinkError instanceof Error ? sinkError.message : String(sinkError),
         });
       }

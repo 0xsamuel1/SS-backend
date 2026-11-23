@@ -25,6 +25,9 @@ export class NotificationDispatchJob {
   @Column({ type: "json" })
   event!: InvoiceLifecycleEvent;
 
+  @Column({ name: "correlation_id", type: "varchar", length: 128, nullable: true })
+  correlationId!: string | null;
+
   @Column({ type: "varchar", length: 16, default: "pending" })
   status!: NotificationJobStatus;
 
