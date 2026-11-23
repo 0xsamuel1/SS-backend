@@ -456,9 +456,41 @@ export class InvestmentService {
               );
             }
 
-            const netAmount = new Decimal(invoice.netAmount);
+            // Validate decimal amounts before and during the database transaction
+            if (!amount.isFinite() || amount.lte(0) || amount.decimalPlaces() > 4) {
+              throw new ServiceError("INVALID_AMOUNT", "Investment amount is invalid", 400);
+            }
+
+            let netAmount: Decimal;
+            try {
+              netAmount = new Decimal(invoice.netAmount);
+            } catch {
+              throw new ServiceError("INVALID_INVOICE", "Invoice net amount is invalid", 500);
+            }
+            if (!netAmount.isFinite() || netAmount.lte(0)) {
+              throw new ServiceError("INVALID_INVOICE", "Invoice net amount must be positive", 500);
+            }
+
             const funded = new Decimal(invoice.fundedAmount ?? 0);
-            const remaining = Decimal.max(netAmount.minus(funded), 0);
+            if (!funded.isFinite() || funded.lt(0)) {
+              throw new ServiceError("INVALID_INVOICE", "Invoice funded amount is invalid", 500);
+            }
+
+            let totalActive = new Decimal(0);
+            if (typeof manager.find === "function") {
+              const activeInvestments = await manager.find(Investment, {
+                where: [
+                  { invoiceId, status: InvestmentStatus.PENDING },
+                  { invoiceId, status: InvestmentStatus.CONFIRMED },
+                ],
+              });
+              totalActive = activeInvestments.reduce(
+                (sum, inv) => sum.plus(new Decimal(inv.investmentAmount)),
+                new Decimal(0)
+              );
+            }
+            const currentFunded = Decimal.max(funded, totalActive);
+            const remaining = Decimal.max(netAmount.minus(currentFunded), 0);
             if (amount.gt(remaining)) {
               throw new ServiceError(
                 "INSUFFICIENT_CAPACITY",
@@ -586,7 +618,8 @@ export class InvestmentService {
           throw new ServiceError(
             "CONCURRENT_INVESTMENT_CONFLICT",
             "Unable to process investment due to concurrent modifications. Please retry.",
-            409
+            409,
+            { retryAfterMs: 25 * attempt, retryable: true }
           );
         }
         await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
@@ -638,10 +671,22 @@ export class InvestmentService {
       }
     }
 
-    // Validate investment amount
-    const amount = new Decimal(investmentAmount);
-    if (amount.isNegative() || amount.isZero()) {
-      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be greater than zero");
+    // Validate investment amount before the database transaction
+    let amount: Decimal;
+    try {
+      amount = new Decimal(investmentAmount);
+    } catch {
+      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be a number", 400);
+    }
+    if (!amount.isFinite() || amount.lte(0)) {
+      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be greater than zero", 400);
+    }
+    if (amount.decimalPlaces() > 4) {
+      throw new ServiceError(
+        "INVALID_AMOUNT",
+        "Investment amount supports at most 4 decimal places",
+        400
+      );
     }
 
     const MAX_RETRIES = 3;
@@ -698,12 +743,28 @@ export class InvestmentService {
             throw new ServiceError("INVOICE_NOT_FOUND", "Invoice not found", 404);
           }
 
+          // Validate decimal amounts during the database transaction
+          if (!amount.isFinite() || amount.lte(0) || amount.decimalPlaces() > 4) {
+            throw new ServiceError("INVALID_AMOUNT", "Investment amount is invalid", 400);
+          }
+
+          let netAmount: Decimal;
+          try {
+            netAmount = new Decimal(invoice.netAmount);
+          } catch {
+            throw new ServiceError("INVALID_INVOICE", "Invoice net amount is invalid", 500);
+          }
+          if (!netAmount.isFinite() || netAmount.lte(0)) {
+            throw new ServiceError("INVALID_INVOICE", "Invoice net amount must be positive", 500);
+          }
+
           // 2. Validate invoice status
           if (invoice.status !== InvoiceStatus.PUBLISHED) {
             if (invoice.status === InvoiceStatus.FUNDED) {
               throw new ServiceError(
                 "INSUFFICIENT_CAPACITY",
-                "Invoice is already fully funded"
+                "Invoice is already fully funded",
+                400
               );
             }
             throw new ServiceError(
@@ -733,34 +794,82 @@ export class InvestmentService {
 
           // 5. Check remaining capacity
           // We count both PENDING and CONFIRMED investments towards the cap to prevent over-subscription
-          const activeInvestments = await transactionalEntityManager.find(Investment, {
-            where: [
-              { invoiceId, status: InvestmentStatus.PENDING },
-              { invoiceId, status: InvestmentStatus.CONFIRMED },
-            ],
-          });
+          let totalInvested = new Decimal(0);
+          if (typeof transactionalEntityManager.find === "function") {
+            const activeInvestments = await transactionalEntityManager.find(Investment, {
+              where: [
+                { invoiceId, status: InvestmentStatus.PENDING },
+                { invoiceId, status: InvestmentStatus.CONFIRMED },
+              ],
+            });
+            totalInvested = activeInvestments.reduce(
+              (sum, inv) => sum.plus(new Decimal(inv.investmentAmount)),
+              new Decimal(0)
+            );
+          }
 
-          const totalInvested = activeInvestments.reduce(
-            (sum, inv) => sum.plus(new Decimal(inv.investmentAmount)),
-            new Decimal(0)
-          );
-
-          const netAmount = new Decimal(invoice.netAmount);
-          const remainingCapacity = netAmount.minus(totalInvested);
+          const invoiceFunded = new Decimal(invoice.fundedAmount ?? 0);
+          const currentFunded = Decimal.max(totalInvested, invoiceFunded);
+          const remainingCapacity = Decimal.max(netAmount.minus(currentFunded), 0);
 
           if (amount.gt(remainingCapacity)) {
             throw new ServiceError(
               "INSUFFICIENT_CAPACITY",
-              `Investment amount ${amount.toString()} exceeds remaining capacity ${remainingCapacity.toString()}`
+              `Investment amount ${amount.toString()} exceeds remaining capacity ${remainingCapacity.toString()}`,
+              400,
+              { remainingCapacity: remainingCapacity.toFixed(4) }
             );
           }
 
-          // 6. Calculate expected return
+          // 6. Lock or conditionally update remaining capacity on the invoice
+          const newTotalInvested = currentFunded.plus(amount);
+          if (newTotalInvested.gt(netAmount)) {
+            throw new ServiceError(
+              "INSUFFICIENT_CAPACITY",
+              `Investment amount exceeds remaining capacity`,
+              400,
+              { remainingCapacity: remainingCapacity.toFixed(4) }
+            );
+          }
+
+          let conditionallyUpdated = false;
+          const updateQb = typeof transactionalEntityManager.createQueryBuilder === "function"
+            ? transactionalEntityManager.createQueryBuilder(Invoice, "invoice")
+            : invoiceRepo && typeof invoiceRepo.createQueryBuilder === "function"
+            ? invoiceRepo.createQueryBuilder("invoice")
+            : null;
+
+          if (updateQb && "update" in updateQb && typeof updateQb.update === "function") {
+            const updateResult = await updateQb
+              .update(Invoice)
+              .set({
+                fundedAmount: () => "funded_amount + :amount",
+                version: () => "version + 1",
+              })
+              .where("id = :id", { id: invoiceId })
+              .andWhere("version = :version", { version: invoice.version })
+              .andWhere("status = :status", { status: InvoiceStatus.PUBLISHED })
+              .andWhere("funded_amount + :amount <= net_amount")
+              .setParameter("amount", amount.toFixed(4))
+              .execute();
+
+            if (updateResult && typeof updateResult.affected === "number") {
+              if (updateResult.affected !== 1) {
+                throw new FundingConflictError();
+              }
+              conditionallyUpdated = true;
+            }
+          }
+
+          invoice.fundedAmount = newTotalInvested.toFixed(4);
+          invoice.version = (invoice.version ?? 0) + 1;
+
+          // 7. Calculate expected return
           // expectedReturn = investmentAmount * (invoice.amount / invoice.netAmount)
           const faceAmount = new Decimal(invoice.amount);
           const expectedReturn = amount.times(faceAmount.dividedBy(netAmount)).toDecimalPlaces(4);
 
-          // 7. Create investment
+          // 8. Create investment
           const investment = transactionalEntityManager.create(Investment, {
             invoiceId,
             investorId,
@@ -772,7 +881,7 @@ export class InvestmentService {
 
           const savedInvestment = await transactionalEntityManager.save(Investment, investment);
 
-          // 8. Emit structured log for the investment commitment
+          // 9. Emit structured log for the investment commitment
           const truncatedWallet =
             investorWallet.length >= 8
               ? `${investorWallet.slice(0, 4)}…${investorWallet.slice(-4)}`
@@ -788,12 +897,6 @@ export class InvestmentService {
             committed_at: savedInvestment.createdAt?.toISOString() ?? new Date().toISOString(),
           });
 
-          // 9. Transition invoice to FUNDED if fully subscribed
-          const newTotalInvested = totalInvested.plus(amount);
-          // Keep funded_amount in step with this path too, so it and
-          // POST /invoices/:id/invest agree on remaining capacity. The row is
-          // locked above, so the plain save is safe here.
-          invoice.fundedAmount = newTotalInvested.toFixed(4);
           let fundedTransition: InvoiceTransition | null = null;
           if (newTotalInvested.gte(netAmount)) {
             fundedTransition = await this.stateMachine.transition(
@@ -806,7 +909,7 @@ export class InvestmentService {
                 context: { fundedAmount: newTotalInvested.toFixed(4) },
               }
             );
-          } else {
+          } else if (!conditionallyUpdated) {
             await transactionalEntityManager.save(Invoice, invoice);
           }
 
@@ -819,7 +922,10 @@ export class InvestmentService {
         }
         return savedInvestment;
       } catch (error) {
-        if (error instanceof OptimisticLockVersionMismatchError) {
+        const isConflict =
+          error instanceof FundingConflictError ||
+          error instanceof OptimisticLockVersionMismatchError;
+        if (isConflict) {
           attempt++;
           if (attempt >= MAX_RETRIES) {
             logger.warn("Optimistic lock retry exhausted for investment", {
@@ -831,7 +937,8 @@ export class InvestmentService {
             throw new ServiceError(
               "CONCURRENT_INVESTMENT_CONFLICT",
               "Unable to process investment due to concurrent modifications. Please retry.",
-              409
+              409,
+              { retryAfterMs: 50 * attempt, retryable: true }
             );
           }
           // Brief exponential backoff before retry
@@ -845,7 +952,8 @@ export class InvestmentService {
     throw new ServiceError(
       "CONCURRENT_INVESTMENT_CONFLICT",
       "Unable to process investment due to concurrent modifications. Please retry.",
-      409
+      409,
+      { retryAfterMs: 50 * MAX_RETRIES, retryable: true }
     );
   }
 }
