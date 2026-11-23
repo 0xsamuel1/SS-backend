@@ -36,6 +36,7 @@ export class TypeOrmNotificationJobStore implements NotificationJobStore {
       .into(NotificationDispatchJob)
       .values({
         eventId: job.eventId,
+        correlationId: job.correlationId ?? null,
         event: job.event,
         status: "pending",
         attempts: 0,
@@ -248,6 +249,7 @@ export class TypeOrmNotificationJobStore implements NotificationJobStore {
 function toJob(row: NotificationDispatchJob): NotificationJob {
   return {
     eventId: row.eventId,
+    correlationId: row.correlationId ?? undefined,
     event: reviveLifecycleEvent(row.event),
     status: row.status,
     attempts: row.attempts,

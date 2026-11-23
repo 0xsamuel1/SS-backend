@@ -25,6 +25,8 @@ export type NotificationJobStatus = "pending" | "processing" | "dead";
 export interface NotificationJob {
   /** Stable identity, derived from the lifecycle event. */
   eventId: string;
+  /** Correlation ID propagated from the originating request/event for tracing. */
+  correlationId?: string;
   event: InvoiceLifecycleEvent;
   status: NotificationJobStatus;
   /** Attempts started so far, persisted across worker replacement. */
@@ -44,6 +46,8 @@ export interface NewNotificationJob {
   eventId: string;
   event: InvoiceLifecycleEvent;
   nextAttemptAt: Date;
+  /** Optional correlation ID propagated from the originating request. */
+  correlationId?: string;
 }
 
 export interface ClaimDueOptions {
@@ -100,6 +104,7 @@ export interface NotificationJobStore {
 function cloneJob(job: NotificationJob): NotificationJob {
   return {
     ...job,
+    correlationId: job.correlationId,
     event: {
       ...job.event,
       invoice: { ...job.event.invoice },
@@ -147,6 +152,7 @@ export class InMemoryNotificationJobStore implements NotificationJobStore {
       job.eventId,
       cloneJob({
         eventId: job.eventId,
+        correlationId: job.correlationId,
         event: job.event,
         status: "pending",
         attempts: 0,
