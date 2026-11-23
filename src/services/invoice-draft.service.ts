@@ -145,10 +145,11 @@ export class InvoiceDraftService {
         });
 
         return saved;
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const errorObj = err as { name?: string; code?: string; message?: string } | undefined;
         if (
           err instanceof OptimisticLockVersionMismatchError ||
-          err?.name === "OptimisticLockVersionMismatchError"
+          errorObj?.name === "OptimisticLockVersionMismatchError"
         ) {
           const current = await repository.findOne({ where: { id } });
           throw new ServiceError(
@@ -188,11 +189,12 @@ export class InvoiceDraftService {
         });
 
         return saved;
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const errorObj = err as { code?: string; message?: string } | undefined;
         if (
-          err?.code === "23505" ||
-          String(err?.message).includes("UNIQUE") ||
-          String(err?.message).includes("duplicate key")
+          errorObj?.code === "23505" ||
+          String(errorObj?.message).includes("UNIQUE") ||
+          String(errorObj?.message).includes("duplicate key")
         ) {
           const current = await repository.findOne({ where: { id } });
           if (current) {
