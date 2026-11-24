@@ -400,6 +400,43 @@ export class EventIndexerService {
           continue;
         }
 
+        // Issue #757: Failed contract invocations must not mutate off-chain
+        // projections (invoices, investments, insights, or event bus handlers).
+        // Persist the raw event for diagnostics and advance the ledger watermark
+        // without counting it as a successfully applied business transition.
+        if (!incoming.inSuccessfulContractCall) {
+          this.logger.warn("Ignoring Soroban event from failed contract call", {
+            eventId,
+            contractId: incoming.contractId,
+            ledger: incoming.ledger,
+            topic: incoming.topic,
+            txHash: incoming.txHash,
+          });
+
+          if (this.eventLogRepository && !existingLog) {
+            const parsedTime = parseLedgerTime(incoming.ledgerClosedAt);
+            const logEntry = this.eventLogRepository.create({
+              eventId,
+              contractId: incoming.contractId,
+              ledgerSequence: incoming.ledger.toString(),
+              topic: incoming.topic,
+              txHash: incoming.txHash,
+              payload: {
+                topics: incoming.topics,
+                data: incoming.data,
+                ledgerClosedAt: incoming.ledgerClosedAt,
+                inSuccessfulContractCall: false,
+              },
+              ledgerClosedAt: parsedTime.ok ? parsedTime.value : null,
+              processed: false,
+            });
+            await this.eventLogRepository.save(logEntry);
+          }
+
+          highestProcessedLedger = Math.max(highestProcessedLedger, incoming.ledger);
+          continue;
+        }
+
         // Issue #812: the first valid ledger time stored for an event is
         // authoritative. A replay may fill a missing value but never replaces
         // one, and projections always see the stored time.

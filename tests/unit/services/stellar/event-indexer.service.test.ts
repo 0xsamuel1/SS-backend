@@ -360,6 +360,81 @@ describe("EventIndexerService (Issue #135)", () => {
         })
       );
     });
+
+    it("ignores failed contract-call events for projections while retaining raw diagnostic logs (#757)", async () => {
+      const mockInvestorInsightsService = {
+        processEvent: jest.fn().mockResolvedValue(undefined),
+      };
+      const mockEventBus = {
+        dispatch: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const service = new EventIndexerService({
+        contractIds: [ESCROW_CONTRACT_ID],
+        eventLogRepository: mockEventLogRepo,
+        checkpointRepository: mockCheckpointRepo,
+        invoiceRepository: mockInvoiceRepo,
+        investmentRepository: mockInvestmentRepo,
+        investorInsightsService: mockInvestorInsightsService as any,
+        eventBus: mockEventBus as any,
+        logger: mockLogger,
+      });
+
+      const failedEvents = [
+        {
+          id: "evt-failed-invoice",
+          contractId: ESCROW_CONTRACT_ID,
+          ledger: 2010,
+          ledgerClosedAt: "2026-08-25T12:12:00Z",
+          txHash: "0xfailed1",
+          topic: "create_escrow",
+          topics: ["create_escrow", "INV-100"],
+          data: null,
+          inSuccessfulContractCall: false,
+        },
+        {
+          id: "evt-failed-investment",
+          contractId: ESCROW_CONTRACT_ID,
+          ledger: 2011,
+          ledgerClosedAt: "2026-08-25T12:13:00Z",
+          txHash: "0xfailed2",
+          topic: "investment_funded",
+          topics: ["investment_funded"],
+          data: { investment_id: "investment-1" },
+          inSuccessfulContractCall: false,
+        },
+      ];
+
+      const processed = await service.ingestEvents(failedEvents);
+
+      expect(processed).toBe(0);
+      expect(mockInvoiceRepo.findOne).not.toHaveBeenCalled();
+      expect(mockInvoiceRepo.save).not.toHaveBeenCalled();
+      expect(mockInvestmentRepo.findOne).not.toHaveBeenCalled();
+      expect(mockInvestmentRepo.save).not.toHaveBeenCalled();
+      expect(mockInvestorInsightsService.processEvent).not.toHaveBeenCalled();
+      expect(mockEventBus.dispatch).not.toHaveBeenCalled();
+
+      expect(mockEventLogRepo.save).toHaveBeenCalledTimes(2);
+      expect(mockEventLogRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventId: "evt-failed-invoice",
+          processed: false,
+          payload: expect.objectContaining({ inSuccessfulContractCall: false }),
+        })
+      );
+      expect(mockEventLogRepo.update).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ processed: true })
+      );
+      expect(mockCheckpointRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ ledgerSequence: "2011" })
+      );
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        "Ignoring Soroban event from failed contract call",
+        expect.objectContaining({ eventId: "evt-failed-invoice", ledger: 2010 })
+      );
+    });
   });
 
   describe("Last Indexed Ledger & Lifecycle", () => {
