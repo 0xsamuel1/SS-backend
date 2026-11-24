@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "crypto";
 import { SorobanRpc, scValToNative, xdr } from "stellar-sdk";
-import type { DataSource, Repository } from "typeorm";
+import { In, type DataSource, type Repository } from "typeorm";
 import type { AppLogger } from "../../observability/logger";
 import { logger as globalLogger } from "../../observability/logger";
 import { Investment } from "../../models/Investment.model";
@@ -1003,8 +1003,14 @@ export class EventIndexerService {
       (this.normalizedContractIds.length === 1 ||
         this.newStreamBackfillPolicy === "resume_from_legacy")
     ) {
+      // Issue #755: Scope fallback recovery to processed logs belonging to
+      // this indexer's configured contracts so unrelated streams or failed/
+      // unprocessed event logs never advance the resume ledger past missed work.
       const latest = await this.eventLogRepository.findOne({
-        where: {},
+        where: {
+          contractId: In(this.normalizedContractIds),
+          processed: true,
+        },
         order: { ledgerSequence: "DESC" },
       });
       if (latest && latest.ledgerSequence) {

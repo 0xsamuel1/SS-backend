@@ -451,6 +451,109 @@ describe("EventIndexerService (Issue #135)", () => {
       expect(lastLedger).toBe(9999);
     });
 
+    it("excludes unrelated contracts and unprocessed logs when recovering progress without a checkpoint (#755)", async () => {
+      const storedLogs = [
+        { contractId: TOKEN_CONTRACT_ID, ledgerSequence: "15000", processed: true },
+        { contractId: ESCROW_CONTRACT_ID, ledgerSequence: "12000", processed: false },
+        { contractId: ESCROW_CONTRACT_ID, ledgerSequence: "4500", processed: true },
+      ];
+
+      const scopedEventLogRepo = {
+        findOne: jest.fn().mockImplementation(({ where }) => {
+          const allowedContracts = Array.isArray(where?.contractId?.value)
+            ? where.contractId.value
+            : where?.contractId
+              ? [where.contractId]
+              : null;
+
+          const matching = storedLogs
+            .filter((row) => {
+              if (allowedContracts && !allowedContracts.includes(row.contractId)) {
+                return false;
+              }
+              if (where?.processed !== undefined && row.processed !== where.processed) {
+                return false;
+              }
+              return true;
+            })
+            .sort((a, b) => Number(b.ledgerSequence) - Number(a.ledgerSequence));
+
+          return Promise.resolve(matching[0] ?? null);
+        }),
+      };
+
+      const service = new EventIndexerService({
+        contractIds: [ESCROW_CONTRACT_ID],
+        eventLogRepository: scopedEventLogRepo as any,
+        logger: mockLogger,
+      });
+
+      const lastLedger = await service.getLastIndexedLedger();
+
+      expect(lastLedger).toBe(4500);
+      expect(scopedEventLogRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            processed: true,
+          }),
+          order: { ledgerSequence: "DESC" },
+        })
+      );
+      expect(service.getLastResumeDecision()).toEqual(
+        expect.objectContaining({
+          action: "resume_event_log",
+          resumeLedger: 4500,
+        })
+      );
+    });
+
+    it("starts from genesis when only unprocessed or unrelated logs exist (#755)", async () => {
+      const storedLogs = [
+        { contractId: TOKEN_CONTRACT_ID, ledgerSequence: "15000", processed: true },
+        { contractId: ESCROW_CONTRACT_ID, ledgerSequence: "12000", processed: false },
+      ];
+
+      const scopedEventLogRepo = {
+        findOne: jest.fn().mockImplementation(({ where }) => {
+          const allowedContracts = Array.isArray(where?.contractId?.value)
+            ? where.contractId.value
+            : where?.contractId
+              ? [where.contractId]
+              : null;
+
+          const matching = storedLogs
+            .filter((row) => {
+              if (allowedContracts && !allowedContracts.includes(row.contractId)) {
+                return false;
+              }
+              if (where?.processed !== undefined && row.processed !== where.processed) {
+                return false;
+              }
+              return true;
+            })
+            .sort((a, b) => Number(b.ledgerSequence) - Number(a.ledgerSequence));
+
+          return Promise.resolve(matching[0] ?? null);
+        }),
+      };
+
+      const service = new EventIndexerService({
+        contractIds: [ESCROW_CONTRACT_ID],
+        eventLogRepository: scopedEventLogRepo as any,
+        logger: mockLogger,
+      });
+
+      const lastLedger = await service.getLastIndexedLedger();
+
+      expect(lastLedger).toBe(0);
+      expect(service.getLastResumeDecision()).toEqual(
+        expect.objectContaining({
+          action: "start_from_genesis",
+          resumeLedger: 0,
+        })
+      );
+    });
+
     it("persists a checkpoint independently of event rows", async () => {
       const service = new EventIndexerService({
         contractIds: [ESCROW_CONTRACT_ID],
