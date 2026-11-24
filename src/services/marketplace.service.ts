@@ -200,7 +200,8 @@ export class MarketplaceService {
       fundingPercentage,
       netAmount: invoice.netAmount,
       dueDate: invoice.dueDate,
-      fundingDeadline: invoice.dueDate,
+      // Fall back to dueDate only for legacy rows where fundingDeadline is null.
+      fundingDeadline: invoice.fundingDeadline ?? invoice.dueDate,
       status: invoice.status,
       createdAt: invoice.createdAt,
     };

@@ -210,5 +210,32 @@ describe("MarketplaceService", () => {
 
       expect(result.meta.totalPages).toBe(3); // Math.ceil(25 / 10)
     });
+
+    it("returns stored fundingDeadline separately from dueDate and falls back to dueDate only when null (#751)", async () => {
+      const fundingDeadline = new Date("2025-02-15T12:00:00.000Z");
+      const dueDate = new Date("2025-04-30T00:00:00.000Z");
+      const invoiceWithDeadline = {
+        ...mockInvoices[0],
+        dueDate,
+        fundingDeadline,
+      } as Invoice;
+      const legacyInvoice = {
+        ...mockInvoices[1],
+        dueDate,
+        fundingDeadline: null,
+      } as Invoice;
+
+      mockMarketplaceRepository.findPublishedInvoices.mockResolvedValue({
+        invoices: [invoiceWithDeadline, legacyInvoice],
+        total: 2,
+      });
+
+      const result = await marketplaceService.getPublishedInvoices();
+
+      expect(result.data[0].fundingDeadline).toEqual(fundingDeadline);
+      expect(result.data[0].dueDate).toEqual(dueDate);
+      expect(result.data[1].fundingDeadline).toEqual(dueDate);
+      expect(result.data[1].dueDate).toEqual(dueDate);
+    });
   });
 });

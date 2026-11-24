@@ -131,6 +131,23 @@ describe("MarketplaceService.getPublishedInvoicesByCursor", () => {
     );
   });
 
+  it("returns stored fundingDeadline separately from dueDate in cursor-paginated results (#751)", async () => {
+    const fundingDeadline = new Date("2026-02-01T15:30:00.000Z");
+    const dueDate = new Date("2026-05-01T00:00:00.000Z");
+    const invoice = makeInvoice({ dueDate, fundingDeadline });
+
+    repo.findPublishedInvoicesByCursor.mockResolvedValue({
+      invoices: [invoice],
+      nextCursor: null,
+      hasMore: false,
+    });
+
+    const result = await service.getPublishedInvoicesByCursor({}, { sortField: "amount", limit: 10 });
+
+    expect(result.data[0].fundingDeadline).toEqual(fundingDeadline);
+    expect(result.data[0].dueDate).toEqual(dueDate);
+  });
+
   it("passes through a supplied cursor and custom filters unchanged", async () => {
     repo.findPublishedInvoicesByCursor.mockResolvedValue({
       invoices: [],
