@@ -26,6 +26,14 @@ import type { IPFSService, IPFSUploadResult } from "./ipfs.service";
 import { decodeInvoiceCursor, encodeInvoiceCursor } from "../utils/invoice-cursor.utils";
 import { percentageString } from "../utils/percentage.utils";
 import { parseContentChecksum, verifyDocumentChecksum } from "../lib/document-checksum";
+import {
+  decodeLifecycleHistoryCursor,
+  encodeLifecycleHistoryCursor,
+  redactLifecycleHistoryRow,
+  type LifecycleHistoryPage,
+  type LifecycleHistoryRow,
+  type LifecycleHistoryViewer,
+} from "../lib/invoice-lifecycle-history";
 
 export interface InvoiceRepositoryContract {
   findOne(options: { where: { id: string }; relations?: string[] }): Promise<Invoice | null>;
@@ -851,6 +859,91 @@ export class InvoiceService {
       logger.error("Failed to fetch invoice status history", { error, invoiceId });
       throw new ServiceError("invoice_history_failed", "Failed to fetch invoice status history", 500);
     }
+  }
+
+  /**
+   * One page of an invoice's lifecycle history (issue #795), oldest first.
+   *
+   * Visible to the invoice's seller and to admins. Anyone else, and any
+   * unknown invoice, gets the same 404, so a caller cannot tell whether an
+   * invoice they may not see exists or has history. Pages are keyset pages
+   * on (created_at, id): see lib/invoice-lifecycle-history.ts for why that
+   * order is total and why the cursor keeps microseconds.
+   */
+  async getInvoiceLifecycleHistory(
+    invoiceId: string,
+    viewer: LifecycleHistoryViewer,
+    options: { limit: number; cursor?: string | null }
+  ): Promise<LifecycleHistoryPage> {
+    const invoice = await this.invoiceRepository.findOne({ where: { id: invoiceId } });
+    if (!invoice || (!viewer.isAdmin && invoice.sellerId !== viewer.id)) {
+      throw new ServiceError("invoice_not_found", "Invoice not found", 404);
+    }
+
+    const after = options.cursor
+      ? decodeLifecycleHistoryCursor(options.cursor, invoiceId)
+      : null;
+
+    if (!this.dataSource) {
+      return { items: [], hasMore: false, nextCursor: null, limit: options.limit };
+    }
+
+    let rows: Array<{
+      id: string;
+      from_status: string;
+      to_status: string;
+      actor_role: string;
+      actor_id: string | null;
+      trigger: string;
+      reason: string | null;
+      created_at: Date;
+      created_at_exact: string;
+    }>;
+    try {
+      rows = await this.dataSource.query(
+        `SELECT "id", "from_status", "to_status", "actor_role", "actor_id", "trigger", "reason",
+                "created_at",
+                to_char("created_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+                  AS "created_at_exact"
+         FROM "invoice_status_history"
+         WHERE "invoice_id" = $1
+           AND ($2::timestamptz IS NULL OR ("created_at", "id") > ($2::timestamptz, $3::uuid))
+         ORDER BY "created_at" ASC, "id" ASC
+         LIMIT $4`,
+        [invoiceId, after?.createdAt ?? null, after?.id ?? null, options.limit + 1]
+      );
+    } catch (error) {
+      logger.error("Failed to fetch invoice lifecycle history", { error, invoiceId });
+      throw new ServiceError("invoice_history_failed", "Failed to fetch invoice status history", 500);
+    }
+
+    const hasMore = rows.length > options.limit;
+    const page = hasMore ? rows.slice(0, options.limit) : rows;
+    const last = page[page.length - 1];
+
+    return {
+      items: page.map((row) =>
+        redactLifecycleHistoryRow(
+          {
+            id: row.id,
+            fromStatus: row.from_status as LifecycleHistoryRow["fromStatus"],
+            toStatus: row.to_status as LifecycleHistoryRow["toStatus"],
+            actorRole: row.actor_role as LifecycleHistoryRow["actorRole"],
+            actorId: row.actor_id,
+            trigger: row.trigger,
+            reason: row.reason,
+            createdAt: new Date(row.created_at),
+          },
+          viewer
+        )
+      ),
+      hasMore,
+      nextCursor:
+        hasMore && last
+          ? encodeLifecycleHistoryCursor({ invoiceId, createdAt: last.created_at_exact, id: last.id })
+          : null,
+      limit: options.limit,
+    };
   }
 
   /**

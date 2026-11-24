@@ -34,6 +34,7 @@ import {
 } from "./middleware/suspended-wallet.middleware";
 import type { AdminUserService } from "./services/admin-user.service";
 import { createInvestorRouter } from "./routes/investor.routes";
+import type { InvestorSettlementHistoryService } from "./services/investor-settlement-history.service";
 import { createPortfolioRouter } from "./routes/portfolio.routes";
 import { createContractGuardService } from "./services/stellar/contract-guard.service";
 import { createKeysRouter } from "./routes/keys.routes";
@@ -283,6 +284,8 @@ export interface AppDependencies {
   secondaryAuctionService?: SecondaryAuctionService;
   /** Issue #780 — accreditation expiry gating and renewal. */
   accreditationService?: InvestorAccreditationService;
+  /** Issue #782 — investor settlement history and CSV export. */
+  settlementHistoryService?: InvestorSettlementHistoryService;
   logger?: AppLogger;
   metricsEnabled?: boolean;
   metricsRegistry?: MetricsRegistry;
@@ -357,6 +360,7 @@ export function createApp({
   yieldBoostService,
   secondaryAuctionService,
   accreditationService,
+  settlementHistoryService,
   logger: appLogger = logger,
   metricsEnabled = true,
   metricsRegistry = new MetricsRegistry(),
@@ -632,12 +636,13 @@ export function createApp({
   }
 
   // Issue #473 — accreditation acknowledgement; issue #780 — renewal
-  if (acknowledgementService || accreditationService) {
+  if (acknowledgementService || accreditationService || settlementHistoryService) {
     const investorRouter = createInvestorRouter({
       authService,
       acknowledgementService,
       riskProfileService: investorRiskProfileService,
       accreditationService,
+      settlementHistoryService,
     });
     app.use("/api/v1/investors", investorRouter);
     app.use("/investors", investorRouter);
