@@ -75,6 +75,7 @@ import { createBenchmarkService } from "./services/benchmark.service";
 import { createReferralTierService } from "./services/referral-tier.service";
 import { createYieldBoostService } from "./services/yield-boost.service";
 import { createSecondaryAuctionService } from "./services/secondary-auction.service";
+import { createInvestorSettlementHistoryService } from "./services/investor-settlement-history.service";
 import { createInvestorAccreditationService } from "./services/investor-accreditation.service";
 import { createIssuerProfileService } from "./services/issuer-profile.service";
 import { SecondaryDepthService, DEPTH_SWEEP_INTERVAL_MS } from "./services/secondary-depth.service";
@@ -339,6 +340,9 @@ export async function bootstrap(): Promise<{
   // ---- Feature: Accreditation expiry gating & renewal (issue #780) ----
   const accreditationService = createInvestorAccreditationService(dataSource, getRedisClient());
 
+  // ---- Feature: Investor settlement history (issue #782) ----
+  const settlementHistoryService = createInvestorSettlementHistoryService(dataSource);
+
   const app = createApp({
     authService,
     notificationService,
@@ -385,6 +389,7 @@ export async function bootstrap(): Promise<{
     yieldBoostService,
     secondaryAuctionService,
     accreditationService,
+    settlementHistoryService,
     documentExportService,
     config,
     logger,

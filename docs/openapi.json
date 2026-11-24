@@ -4612,6 +4612,236 @@
           }
         }
       }
+    },
+    "/api/v1/investors/{wallet}/settlements": {
+      "get": {
+        "summary": "Settlement history with pro-rata returns, newest first (issue #782)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must be the caller's own wallet"
+          },
+          {
+            "name": "from_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Inclusive. YYYY-MM-DD (start of the UTC day) or a timestamp with a timezone"
+          },
+          {
+            "name": "to_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Inclusive. YYYY-MM-DD covers the whole UTC day"
+          },
+          {
+            "name": "invoice_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "Invoice category, case-insensitive"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of settlements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "invoice_id": {
+                            "type": "string"
+                          },
+                          "invoice_number": {
+                            "type": "string"
+                          },
+                          "settled_at": {
+                            "type": "string"
+                          },
+                          "fractions_held": {
+                            "type": "string"
+                          },
+                          "invested_amount": {
+                            "type": "string"
+                          },
+                          "payout_amount": {
+                            "type": "string"
+                          },
+                          "principal_returned": {
+                            "type": "string"
+                          },
+                          "yield_earned": {
+                            "type": "string"
+                          },
+                          "fees": {
+                            "type": "string"
+                          },
+                          "net_return_usd": {
+                            "type": "string"
+                          },
+                          "net_return_pct": {
+                            "type": "string"
+                          },
+                          "invoice_type": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "fee_data_available": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "hasMore": {
+                          "type": "boolean"
+                        },
+                        "nextCursor": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_LIMIT, INVALID_CURSOR, INVALID_DATE, INVALID_DATE_RANGE or INVALID_INVOICE_TYPE"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not the caller's wallet"
+          }
+        }
+      }
+    },
+    "/api/v1/investors/{wallet}/settlements/export": {
+      "get": {
+        "summary": "CSV export of the settlement history (issue #782)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must be the caller's own wallet"
+          },
+          {
+            "name": "from_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Inclusive. YYYY-MM-DD (start of the UTC day) or a timestamp with a timezone"
+          },
+          {
+            "name": "to_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Inclusive. YYYY-MM-DD covers the whole UTC day"
+          },
+          {
+            "name": "invoice_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "Invoice category, case-insensitive"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/csv, one row per settlement, same fields as the JSON",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not the caller's wallet"
+          },
+          "422": {
+            "description": "EXPORT_TOO_LARGE: more than 10000 rows; narrow the date range"
+          }
+        }
+      }
     }
   }
 }
