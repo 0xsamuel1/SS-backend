@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "crypto";
 import { SorobanRpc, scValToNative, xdr } from "stellar-sdk";
-import type { DataSource, Repository } from "typeorm";
+import { In, type DataSource, type Repository } from "typeorm";
 import type { AppLogger } from "../../observability/logger";
 import { logger as globalLogger } from "../../observability/logger";
 import { Investment } from "../../models/Investment.model";
@@ -397,6 +397,43 @@ export class EventIndexerService {
             ) : [];
         if (existing?.processed || receipts.length > 0) {
           processedCount++;
+          continue;
+        }
+
+        // Issue #757: Failed contract invocations must not mutate off-chain
+        // projections (invoices, investments, insights, or event bus handlers).
+        // Persist the raw event for diagnostics and advance the ledger watermark
+        // without counting it as a successfully applied business transition.
+        if (!incoming.inSuccessfulContractCall) {
+          this.logger.warn("Ignoring Soroban event from failed contract call", {
+            eventId,
+            contractId: incoming.contractId,
+            ledger: incoming.ledger,
+            topic: incoming.topic,
+            txHash: incoming.txHash,
+          });
+
+          if (this.eventLogRepository && !existingLog) {
+            const parsedTime = parseLedgerTime(incoming.ledgerClosedAt);
+            const logEntry = this.eventLogRepository.create({
+              eventId,
+              contractId: incoming.contractId,
+              ledgerSequence: incoming.ledger.toString(),
+              topic: incoming.topic,
+              txHash: incoming.txHash,
+              payload: {
+                topics: incoming.topics,
+                data: incoming.data,
+                ledgerClosedAt: incoming.ledgerClosedAt,
+                inSuccessfulContractCall: false,
+              },
+              ledgerClosedAt: parsedTime.ok ? parsedTime.value : null,
+              processed: false,
+            });
+            await this.eventLogRepository.save(logEntry);
+          }
+
+          highestProcessedLedger = Math.max(highestProcessedLedger, incoming.ledger);
           continue;
         }
 
@@ -966,8 +1003,14 @@ export class EventIndexerService {
       (this.normalizedContractIds.length === 1 ||
         this.newStreamBackfillPolicy === "resume_from_legacy")
     ) {
+      // Issue #755: Scope fallback recovery to processed logs belonging to
+      // this indexer's configured contracts so unrelated streams or failed/
+      // unprocessed event logs never advance the resume ledger past missed work.
       const latest = await this.eventLogRepository.findOne({
-        where: {},
+        where: {
+          contractId: In(this.normalizedContractIds),
+          processed: true,
+        },
         order: { ledgerSequence: "DESC" },
       });
       if (latest && latest.ledgerSequence) {

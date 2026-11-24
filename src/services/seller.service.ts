@@ -77,7 +77,8 @@ export class SellerService {
         fundedAmount: inv.fundedAmount || "0",
         fundingTarget: inv.netAmount || inv.amount,
         fundingPercentage: percentage,
-        fundingDeadline: inv.dueDate,
+        // Fall back to dueDate only for legacy rows where fundingDeadline is null.
+        fundingDeadline: inv.fundingDeadline ?? inv.dueDate,
         dueDate: inv.dueDate,
         createdAt: inv.createdAt,
       };

@@ -179,7 +179,10 @@ export class MarketplaceService {
     const target = invoice.netAmount || invoice.amount || "0";
     const raised = invoice.fundedAmount || "0";
     const fundingPercentage = percentageNumber(raised, target, { maximum: 100 });
-    const yieldBps = percentageToBasisPoints(invoice.discountRate || "0");
+    // Preserve canonical stored yieldBps (including explicit 0); fall back to
+    // discountRate-derived basis points only for legacy rows where yieldBps is null.
+    const yieldBps =
+      invoice.yieldBps ?? percentageToBasisPoints(invoice.discountRate || "0");
 
     return {
       id: invoice.id,
@@ -200,7 +203,8 @@ export class MarketplaceService {
       fundingPercentage,
       netAmount: invoice.netAmount,
       dueDate: invoice.dueDate,
-      fundingDeadline: invoice.dueDate,
+      // Fall back to dueDate only for legacy rows where fundingDeadline is null.
+      fundingDeadline: invoice.fundingDeadline ?? invoice.dueDate,
       status: invoice.status,
       createdAt: invoice.createdAt,
     };
