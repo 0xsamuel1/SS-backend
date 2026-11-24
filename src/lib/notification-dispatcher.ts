@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { logger as defaultLogger, type AppLogger } from "../observability/logger";
 import { getCorrelationId } from "../observability/request-context";
 import { InvoiceStatus, NotificationType } from "../types/enums";
+import { redactString } from "../observability/redaction-formatter";
 import type { Invoice } from "../models/Invoice.model";
 import type { InvestorDirectory } from "./invoice-notifications";
 import type { InvoiceTransition, TransitionEffect } from "./invoice-state-machine";
@@ -247,16 +248,17 @@ export class NotificationDispatcher {
     event: InvoiceLifecycleEvent,
     correlationId?: string
   ): Promise<boolean> {
-    const resolvedCorrelationId =
+    const resolvedCorrelationId = sanitizeNotificationText(
       correlationId ??
       event.correlationId ??
       getCorrelationId?.() ??
-      randomUUID();
-    const eventWithCorrelation: InvoiceLifecycleEvent = {
+      randomUUID()
+    );
+    const eventWithCorrelation = sanitizeNotificationEvent({
       ...event,
       correlationId: resolvedCorrelationId,
-    };
-    const eventId = eventIdFor(event);
+    });
+    const eventId = sanitizeNotificationText(eventIdFor(event));
     const created = await this.jobs.create({
       eventId,
       event: eventWithCorrelation,
@@ -309,10 +311,24 @@ export class NotificationDispatcher {
   }
 
   /** Deliberately re-queues a dead letter under its original event identity. */
-  async replayDeadLetter(eventId: string): Promise<boolean> {
-    const replayed = await this.jobs.replayDeadLetter(eventId, this.now());
-    if (replayed && this.autoDispatch) setImmediate(() => void this.pump());
+  async replayDeadLetter(eventId: string, actorId = "system"): Promise<boolean> {
+    const replayed = await this.jobs.replayDeadLetter(eventId, actorId, this.now());
+    if (replayed) {
+      this.log.info("Notification dead letter replayed.", { event_id: eventId, actor_id: actorId });
+      if (this.autoDispatch) setImmediate(() => void this.pump());
+    }
     return replayed;
+  }
+
+  async discardDeadLetter(eventId: string, actorId: string): Promise<boolean> {
+    const discarded = await this.jobs.discardDeadLetter(eventId, actorId, this.now());
+    if (discarded) {
+      this.log.info("Notification dead letter discarded.", {
+        event_id: eventId,
+        actor_id: actorId,
+      });
+    }
+    return discarded;
   }
 
   /**
@@ -392,10 +408,13 @@ export class NotificationDispatcher {
         ownership_kept: completed,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = sanitizeNotificationText(
+        error instanceof Error ? error.message : String(error)
+      );
+      const permanent = isPermanentNotificationError(error);
 
-      if (job.attempts < this.maxAttempts) {
-        const delay = this.retryDelayMs * 2 ** (job.attempts - 1);
+      if (!permanent && job.attempts < this.maxAttempts) {
+        const delay = Math.min(5 * 60_000, this.retryDelayMs * 2 ** (job.attempts - 1));
         const nextAttemptAt = new Date(this.now().getTime() + delay);
         const persisted = await this.jobs.reschedule(
           eventId,
@@ -426,7 +445,7 @@ export class NotificationDispatcher {
 
       const deadLetter: DeadLetter = {
         eventId,
-        event,
+        event: sanitizeNotificationEvent(event),
         attempts: job.attempts,
         error: message,
         failedAt: this.now(),
@@ -499,6 +518,51 @@ export class InMemoryDeadLetterSink implements DeadLetterSink {
   record(entry: DeadLetter): void {
     this.entries.push(entry);
   }
+}
+
+function getErrorStatus(error: unknown): number | null {
+  if (typeof error !== "object" || error === null) return null;
+  const candidate = error as { status?: unknown; statusCode?: unknown };
+  const status = typeof candidate.statusCode === "number" ? candidate.statusCode : candidate.status;
+  return typeof status === "number" ? status : null;
+}
+
+function isPermanentNotificationError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { permanent?: unknown; retryable?: unknown };
+  if (candidate.permanent === true || candidate.retryable === false) return true;
+  if (candidate.retryable === true || candidate.permanent === false) return false;
+  const status = getErrorStatus(error);
+  return (
+    status !== null &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 425 &&
+    status !== 429
+  );
+}
+
+export function sanitizeNotificationEvent(event: InvoiceLifecycleEvent): InvoiceLifecycleEvent {
+  return {
+    kind: event.kind,
+    correlationId: event.correlationId ? sanitizeNotificationText(event.correlationId) : undefined,
+    invoice: {
+      id: sanitizeNotificationText(event.invoice.id),
+      sellerId: sanitizeNotificationText(event.invoice.sellerId),
+      invoiceNumber: sanitizeNotificationText(event.invoice.invoiceNumber),
+    },
+    reason: event.reason ? sanitizeNotificationText(event.reason) : event.reason,
+    newDeadline: event.newDeadline,
+    eventId: event.eventId ? sanitizeNotificationText(event.eventId) : undefined,
+  };
+}
+
+export function sanitizeNotificationText(value: string): string {
+  return redactString(value).replace(
+    /\b(password|secret|token|api[_-]?key|private[_-]?key|authorization)\s*([:=])\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+    "$1$2[REDACTED]"
+  );
 }
 
 /** State machine effect: enqueue the lifecycle event for a committed transition. */

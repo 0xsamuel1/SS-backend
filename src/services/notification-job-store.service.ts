@@ -1,5 +1,9 @@
 import type { DataSource, Repository } from "typeorm";
-import type { DeadLetter } from "../lib/notification-dispatcher";
+import {
+  sanitizeNotificationEvent,
+  sanitizeNotificationText,
+  type DeadLetter,
+} from "../lib/notification-dispatcher";
 import {
   reviveLifecycleEvent,
   type ClaimDueOptions,
@@ -9,6 +13,7 @@ import {
   type RecoverLeasesOptions,
 } from "../lib/notification-job-store";
 import { NotificationDispatchJob } from "../models/NotificationDispatchJob.model";
+import { NotificationDeadLetterAudit } from "../models/NotificationDeadLetterAudit.model";
 
 /**
  * TypeORM-backed {@link NotificationJobStore} (issue #772).
@@ -122,7 +127,7 @@ export class TypeOrmNotificationJobStore implements NotificationJobStore {
         status: "pending",
         attempts,
         nextAttemptAt,
-        lastError: error,
+        lastError: sanitizeNotificationText(error),
         claimedBy: null,
         claimedAt: null,
         updatedAt: new Date(),
@@ -148,7 +153,7 @@ export class TypeOrmNotificationJobStore implements NotificationJobStore {
       .set({
         status: "dead",
         attempts,
-        lastError: error,
+        lastError: sanitizeNotificationText(error),
         claimedBy: null,
         claimedAt: null,
         updatedAt: failedAt,
@@ -203,29 +208,57 @@ export class TypeOrmNotificationJobStore implements NotificationJobStore {
     });
     return rows.map((row) => ({
       eventId: row.eventId,
-      event: reviveLifecycleEvent(row.event),
+      event: sanitizeNotificationEvent(reviveLifecycleEvent(row.event)),
       attempts: row.attempts,
-      error: row.lastError ?? "unknown error",
+      error: sanitizeNotificationText(row.lastError ?? "unknown error"),
       failedAt: new Date(row.updatedAt),
     }));
   }
 
-  async replayDeadLetter(eventId: string, now: Date): Promise<boolean> {
-    const result = await this.repository
-      .createQueryBuilder()
-      .update(NotificationDispatchJob)
-      .set({
-        status: "pending",
-        attempts: 0,
-        nextAttemptAt: now,
-        lastError: null,
-        claimedBy: null,
-        claimedAt: null,
-        updatedAt: now,
-      })
-      .where("event_id = :eventId AND status = :dead", { eventId, dead: "dead" })
-      .execute();
-    return (result.affected ?? 0) > 0;
+  async replayDeadLetter(eventId: string, actorId: string, now: Date): Promise<boolean> {
+    return this.repository.manager.transaction(async (manager) => {
+      const result = await manager
+        .getRepository(NotificationDispatchJob)
+        .createQueryBuilder()
+        .update(NotificationDispatchJob)
+        .set({
+          status: "pending",
+          attempts: 0,
+          nextAttemptAt: now,
+          lastError: null,
+          claimedBy: null,
+          claimedAt: null,
+          updatedAt: now,
+        })
+        .where("event_id = :eventId AND status = :dead", { eventId, dead: "dead" })
+        .execute();
+      if ((result.affected ?? 0) !== 1) return false;
+      await manager.getRepository(NotificationDeadLetterAudit).save({
+        eventId,
+        actorId,
+        action: "replayed",
+      });
+      return true;
+    });
+  }
+
+  async discardDeadLetter(eventId: string, actorId: string, now: Date): Promise<boolean> {
+    return this.repository.manager.transaction(async (manager) => {
+      const result = await manager
+        .getRepository(NotificationDispatchJob)
+        .createQueryBuilder()
+        .update(NotificationDispatchJob)
+        .set({ status: "discarded", updatedAt: now })
+        .where("event_id = :eventId AND status = :dead", { eventId, dead: "dead" })
+        .execute();
+      if ((result.affected ?? 0) !== 1) return false;
+      await manager.getRepository(NotificationDeadLetterAudit).save({
+        eventId,
+        actorId,
+        action: "discarded",
+      });
+      return true;
+    });
   }
 
   async pruneDeadLetters(olderThan: Date): Promise<number> {

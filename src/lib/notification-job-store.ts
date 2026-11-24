@@ -20,7 +20,7 @@ import type { DeadLetter, InvoiceLifecycleEvent } from "./notification-dispatche
  * `dedupe_key`, so a partially delivered job can be retried without notifying
  * a recipient twice.
  */
-export type NotificationJobStatus = "pending" | "processing" | "dead";
+export type NotificationJobStatus = "pending" | "processing" | "dead" | "discarded";
 
 export interface NotificationJob {
   /** Stable identity, derived from the lifecycle event. */
@@ -93,7 +93,9 @@ export interface NotificationJobStore {
   /** Inspects retained terminal failures, most recent first. */
   listDeadLetters(limit?: number): Promise<DeadLetter[]>;
   /** Returns a dead letter to pending under its original event id. */
-  replayDeadLetter(eventId: string, now: Date): Promise<boolean>;
+  replayDeadLetter(eventId: string, actorId: string, now: Date): Promise<boolean>;
+  /** Marks a dead letter discarded and records the administrator who did so. */
+  discardDeadLetter(eventId: string, actorId: string, now: Date): Promise<boolean>;
   /** Deletes retained dead letters last updated before the cutoff. */
   pruneDeadLetters(olderThan: Date): Promise<number>;
   /** Pending + processing jobs, used for drain and health reporting. */
@@ -286,7 +288,8 @@ export class InMemoryNotificationJobStore implements NotificationJobStore {
       }));
   }
 
-  async replayDeadLetter(eventId: string, now: Date): Promise<boolean> {
+  async replayDeadLetter(eventId: string, actorId: string, now: Date): Promise<boolean> {
+    void actorId;
     const job = this.jobs.get(eventId);
     if (!job || job.status !== "dead") return false;
     job.status = "pending";
@@ -295,6 +298,15 @@ export class InMemoryNotificationJobStore implements NotificationJobStore {
     job.claimedBy = null;
     job.claimedAt = null;
     job.lastError = null;
+    job.updatedAt = new Date(now);
+    return true;
+  }
+
+  async discardDeadLetter(eventId: string, actorId: string, now: Date): Promise<boolean> {
+    void actorId;
+    const job = this.jobs.get(eventId);
+    if (!job || job.status !== "dead") return false;
+    job.status = "discarded";
     job.updatedAt = new Date(now);
     return true;
   }
@@ -313,7 +325,7 @@ export class InMemoryNotificationJobStore implements NotificationJobStore {
   async countActive(): Promise<number> {
     let count = 0;
     for (const job of this.jobs.values()) {
-      if (job.status !== "dead") count += 1;
+      if (job.status === "pending" || job.status === "processing") count += 1;
     }
     return count;
   }

@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { SorobanRpc, scValToNative, xdr } from "stellar-sdk";
 import type { DataSource, Repository } from "typeorm";
 import type { AppLogger } from "../../observability/logger";
@@ -81,6 +81,7 @@ export class EventIndexerService {
   private readonly investorInsightsService?: InvestorInsightsService;
   private readonly settlementService?: SettlementService;
   private readonly checkpointId: string;
+  private readonly leaseOwner = randomUUID();
   private readonly lagAlertThresholdLedgers: number;
   private readonly eventBus?: ContractEventBus;
 
@@ -345,10 +346,32 @@ export class EventIndexerService {
   }
 
   public async ingestEvents(events: DecodedSorobanEvent[]): Promise<number> {
+    const fencingToken = await this.acquireCheckpointLease();
+    if (fencingToken === null) {
+      this.logger.info("Soroban indexer batch is leased by another worker", {
+        checkpointKey: this.checkpointId,
+      });
+      return 0;
+    }
+
+    try {
+      return await this.ingestClaimedEvents(events, fencingToken);
+    } finally {
+      if (fencingToken !== undefined) await this.releaseCheckpointLease(fencingToken);
+    }
+  }
+
+  private async ingestClaimedEvents(
+    events: DecodedSorobanEvent[],
+    fencingToken?: string
+  ): Promise<number> {
     let processedCount = 0;
     let highestProcessedLedger = this.lastIndexedLedger;
 
     for (const incoming of events) {
+      if (fencingToken && !(await this.renewCheckpointLease(fencingToken))) {
+        throw new Error("Soroban indexer batch lease was lost.");
+      }
       const eventId = incoming.id || `${incoming.txHash}:${incoming.topic}:${incoming.ledger}`;
       try {
         const existingLog = this.eventLogRepository
@@ -424,6 +447,9 @@ export class EventIndexerService {
           }
         }
 
+        if (fencingToken && !(await this.renewCheckpointLease(fencingToken))) {
+          throw new Error("Soroban indexer batch lease was lost before projection.");
+        }
         await this.applyEventStateTransition(event);
         await this.investorInsightsService?.processEvent(event);
 
@@ -469,7 +495,7 @@ export class EventIndexerService {
 
     const checkpointLedger = Math.max(highestProcessedLedger, this.latestObservedLedger);
     if (checkpointLedger > 0) {
-      await this.saveCheckpoint(checkpointLedger);
+      await this.saveCheckpoint(checkpointLedger, fencingToken);
     }
 
     return processedCount;
@@ -551,7 +577,7 @@ export class EventIndexerService {
     );
   }
 
-  public async saveCheckpoint(ledgerSequence: number): Promise<void> {
+  public async saveCheckpoint(ledgerSequence: number, fencingToken?: string): Promise<void> {
     if (!Number.isInteger(ledgerSequence) || ledgerSequence < 0) {
       throw new Error("ledgerSequence must be a non-negative integer.");
     }
@@ -572,8 +598,11 @@ export class EventIndexerService {
              DO UPDATE SET
                "ledger_sequence" = excluded."ledger_sequence",
                "updated_at" = CURRENT_TIMESTAMP
-             WHERE CAST("soroban_indexer_checkpoints"."ledger_sequence" AS INTEGER) < CAST(excluded."ledger_sequence" AS INTEGER)`,
-            [checkpointKey, ledgerSequence.toString()],
+             WHERE CAST("soroban_indexer_checkpoints"."ledger_sequence" AS INTEGER) < CAST(excluded."ledger_sequence" AS INTEGER)
+             ${fencingToken ? `AND "soroban_indexer_checkpoints"."fencing_token" = ?` : ""}`,
+            fencingToken
+              ? [checkpointKey, ledgerSequence.toString(), fencingToken]
+              : [checkpointKey, ledgerSequence.toString()],
           );
         } else {
           await this.checkpointRepository.query(
@@ -583,9 +612,20 @@ export class EventIndexerService {
              DO UPDATE SET
                "ledger_sequence" = EXCLUDED."ledger_sequence",
                "updated_at" = CURRENT_TIMESTAMP
-             WHERE "soroban_indexer_checkpoints"."ledger_sequence" < EXCLUDED."ledger_sequence"`,
-            [checkpointKey, ledgerSequence.toString()],
+             WHERE "soroban_indexer_checkpoints"."ledger_sequence" < EXCLUDED."ledger_sequence"
+             ${fencingToken ? `AND "soroban_indexer_checkpoints"."fencing_token" = $3` : ""}`,
+            fencingToken
+              ? [checkpointKey, ledgerSequence.toString(), fencingToken]
+              : [checkpointKey, ledgerSequence.toString()],
           );
+        }
+        if (fencingToken) {
+          const current = await this.checkpointRepository.findOne({
+            where: { checkpointKey },
+          });
+          if (current?.fencingToken !== fencingToken || current.leaseOwner !== this.leaseOwner) {
+            throw new Error("Soroban indexer batch lease was lost before checkpoint commit.");
+          }
         }
       } else {
         const checkpoint = await this.checkpointRepository.findOne({
@@ -593,6 +633,9 @@ export class EventIndexerService {
         });
 
         const durableLedger = Number(checkpoint?.ledgerSequence ?? 0);
+        if (fencingToken && checkpoint?.fencingToken !== fencingToken) {
+          throw new Error("Soroban indexer batch lease was lost before checkpoint commit.");
+        }
         if (ledgerSequence <= durableLedger) {
           this.lastIndexedLedger = Math.max(this.lastIndexedLedger, durableLedger);
           return;
@@ -609,6 +652,83 @@ export class EventIndexerService {
     }
 
     this.lastIndexedLedger = Math.max(this.lastIndexedLedger, ledgerSequence);
+  }
+
+  private async acquireCheckpointLease(): Promise<string | null | undefined> {
+    const repository = this.checkpointRepository;
+    if (!repository || typeof repository.createQueryBuilder !== "function") return undefined;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 30_000);
+    await repository
+      .createQueryBuilder()
+      .insert()
+      .into(SorobanIndexerCheckpoint)
+      .values({
+        checkpointKey: this.checkpointId,
+        ledgerSequence: "0",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        fencingToken: "0",
+      })
+      .orIgnore()
+      .execute();
+    const claimed = await repository
+      .createQueryBuilder()
+      .update(SorobanIndexerCheckpoint)
+      .set({
+        leaseOwner: this.leaseOwner,
+        leaseExpiresAt: expiresAt,
+        fencingToken: () => '"fencing_token" + 1',
+      })
+      .where("checkpoint_key = :checkpointKey", { checkpointKey: this.checkpointId })
+      .andWhere(
+        "(lease_expires_at IS NULL OR lease_expires_at <= :now OR lease_owner = :owner)",
+        { now, owner: this.leaseOwner }
+      )
+      .execute();
+    if ((claimed.affected ?? 0) !== 1) return null;
+    const row = await repository.findOne({ where: { checkpointKey: this.checkpointId } });
+    if (!row || row.leaseOwner !== this.leaseOwner) return null;
+    return row.fencingToken;
+  }
+
+  private async renewCheckpointLease(fencingToken: string): Promise<boolean> {
+    const repository = this.checkpointRepository;
+    if (!repository) return false;
+    const now = new Date();
+    const result = await repository
+      .createQueryBuilder()
+      .update(SorobanIndexerCheckpoint)
+      .set({ leaseExpiresAt: new Date(now.getTime() + 30_000) })
+      .where(
+        "checkpoint_key = :checkpointKey AND lease_owner = :owner AND fencing_token = :fencingToken AND lease_expires_at > :now",
+        {
+          checkpointKey: this.checkpointId,
+          owner: this.leaseOwner,
+          fencingToken,
+          now,
+        }
+      )
+      .execute();
+    return (result.affected ?? 0) === 1;
+  }
+
+  private async releaseCheckpointLease(fencingToken: string): Promise<void> {
+    const repository = this.checkpointRepository;
+    if (!repository) return;
+    await repository
+      .createQueryBuilder()
+      .update(SorobanIndexerCheckpoint)
+      .set({ leaseOwner: null, leaseExpiresAt: null })
+      .where(
+        "checkpoint_key = :checkpointKey AND lease_owner = :owner AND fencing_token = :fencingToken",
+        {
+          checkpointKey: this.checkpointId,
+          owner: this.leaseOwner,
+          fencingToken,
+        }
+      )
+      .execute();
   }
 
   private async applyEventStateTransition(event: DecodedSorobanEvent): Promise<void> {

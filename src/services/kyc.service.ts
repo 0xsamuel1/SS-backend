@@ -128,6 +128,9 @@ export class KycService {
     return this.dataSource.transaction(async (manager) => {
       const user = await manager.getRepository(User).findOne({
         where: { stellarAddress: wallet },
+        ...(this.dataSource.options.type === "postgres"
+          ? { lock: { mode: "pessimistic_write" as const } }
+          : {}),
       });
       if (!user) throw new HttpError(404, "User not found.");
 
@@ -138,7 +141,23 @@ export class KycService {
           status: In(PENDING_STATUSES),
         },
       });
+      const submissionFingerprint = crypto
+        .createHash("sha256")
+        .update(stableJson(payload))
+        .digest("hex");
       if (existing) {
+        const existingDocs = existing.documents as Record<string, unknown> | null;
+        const existingPayload = {
+          documentType: existingDocs?.documentType,
+          documentNumber: existingDocs?.documentNumber,
+          ipfsDocumentUrl: existingDocs?.ipfsDocumentUrl,
+        };
+        if (
+          existingDocs?.submissionFingerprint === submissionFingerprint ||
+          stableJson(existingPayload) === stableJson(payload)
+        ) {
+          return existing;
+        }
         throw new HttpError(
           409,
           "A KYC verification is already pending or approved for this wallet."
@@ -154,6 +173,7 @@ export class KycService {
           documentType: payload.documentType,
           documentNumber: payload.documentNumber,
           ipfsDocumentUrl: payload.ipfsDocumentUrl,
+          submissionFingerprint,
         },
       });
       const saved = await repository.save(verification);
@@ -262,12 +282,20 @@ export class KycService {
         const user = await userRepository.findOneBy({ id: payload.userId });
         if (!user) throw new HttpError(404, "User not found.");
 
-        const verification = payload.verificationId
-          ? await verificationRepository.findOneBy({ id: payload.verificationId })
-          : await verificationRepository.findOne({
-              where: { userId: payload.userId, status: KYCStatus.PENDING },
-            });
-        if (!verification) throw new HttpError(404, "KYC verification not found.");
+        const verification = await verificationRepository.findOne({
+          where: payload.verificationId
+            ? { id: payload.verificationId }
+            : { userId: payload.userId, status: KYCStatus.PENDING },
+          ...(this.dataSource.options.type === "postgres"
+            ? { lock: { mode: "pessimistic_write" as const } }
+            : {}),
+        });
+        if (!verification || verification.userId !== user.id) {
+          throw new HttpError(404, "KYC verification not found.");
+        }
+        if (verification.status !== KYCStatus.PENDING) {
+          throw new HttpError(409, "KYC verification attempt is no longer pending.");
+        }
 
         const previousStatus = verification.status;
         verification.status = payload.status;
@@ -468,7 +496,8 @@ export class KycService {
 
   /**
    * Submit KYC details and IPFS document CIDs.
-   * If a previous submission was rejected, re-submission resets status to pending and clears rejection reason.
+   * Identical pending submissions return their existing attempt; new content
+   * after rejection creates a separate review attempt.
    */
   async submitKyc(walletOrUserId: string, payload: KycSubmissionInput): Promise<KYCVerification> {
     return this.dataSource.transaction(async (manager) => {
@@ -478,12 +507,16 @@ export class KycService {
 
       const user = await userRepository.findOne({
         where: [{ stellarAddress: walletOrUserId }, { id: walletOrUserId }],
+        ...(this.dataSource.options.type === "postgres"
+          ? { lock: { mode: "pessimistic_write" as const } }
+          : {}),
       });
       if (!user) {
         throw new HttpError(404, "User not found.");
       }
 
       const wallet = user.stellarAddress;
+      const submittedAt = new Date().toISOString();
 
       // Extract document CIDs
       let cids: string[] = [];
@@ -529,16 +562,51 @@ export class KycService {
       if (payload.contactPhone) sellerDetails.contactPhone = payload.contactPhone;
       if (payload.address) sellerDetails.address = payload.address;
 
+      const docData: Record<string, unknown> = {
+        sellerDetails: Object.keys(sellerDetails).length > 0 ? sellerDetails : null,
+        documentCids: cids,
+        documentType: payload.documentType ?? "business",
+        documentNumber: payload.documentNumber ?? null,
+        ipfsDocumentUrl:
+          payload.ipfsDocumentUrl ??
+          (cids[0]
+            ? cids[0].startsWith("ipfs://") || cids[0].startsWith("http")
+              ? cids[0]
+              : `ipfs://${cids[0]}`
+            : null),
+        providerReference: payload.providerReference ?? null,
+        rejectionReason: null,
+        submittedAt,
+      };
+      const fingerprintData = { ...docData };
+      delete fingerprintData.submittedAt;
+      const submissionFingerprint = crypto
+        .createHash("sha256")
+        .update(stableJson(fingerprintData))
+        .digest("hex");
+      docData.submissionFingerprint = submissionFingerprint;
+
       // Find existing verification
-      const existing = await verificationRepository.findOne({
+      const active = await verificationRepository.findOne({
         where: [
-          { wallet, status: In([...PENDING_STATUSES, ...RESUBMITTABLE_STATUSES]) },
-          { userId: user.id, status: In([...PENDING_STATUSES, ...RESUBMITTABLE_STATUSES]) },
+          { wallet, status: In(PENDING_STATUSES) },
+          { userId: user.id, status: In(PENDING_STATUSES) },
         ],
         order: { verifiedAt: "DESC" },
       });
+      const existing =
+        active ??
+        (await verificationRepository.findOne({
+          where: [
+            { wallet, status: In(RESUBMITTABLE_STATUSES) },
+            { userId: user.id, status: In(RESUBMITTABLE_STATUSES) },
+          ],
+          order: { verifiedAt: "DESC" },
+        }));
 
       if (existing) {
+        const existingDocs = existing.documents as Record<string, unknown> | null;
+        if (existingDocs?.submissionFingerprint === submissionFingerprint) return existing;
         if (existing.status === KYCStatus.PENDING) {
           throw new HttpError(409, "A KYC verification is already pending for this wallet.");
         }
@@ -546,9 +614,7 @@ export class KycService {
           throw new HttpError(409, "A KYC verification is already approved for this wallet.");
         }
 
-        // Re-submission allowed on rejected status:
-        // Archive existing verification before resetting
-        const existingDocs = existing.documents as Record<string, unknown> | null;
+        // A resubmission is a new attempt; keep the reviewed attempt immutable.
         const historyEntry = historyRepository.create({
           userId: user.id,
           wallet: existing.wallet ?? wallet,
@@ -570,27 +636,16 @@ export class KycService {
         });
         await historyRepository.save(historyEntry);
 
-        // Reset verification to PENDING and clear rejection reason
-        existing.status = KYCStatus.PENDING;
-        existing.verifiedAt = null;
-        existing.documents = {
-          sellerDetails: Object.keys(sellerDetails).length > 0 ? sellerDetails : null,
-          documentCids: cids,
-          documentType: payload.documentType ?? "business",
-          documentNumber: payload.documentNumber ?? null,
-          ipfsDocumentUrl:
-            payload.ipfsDocumentUrl ??
-            (cids[0]
-              ? cids[0].startsWith("ipfs://") || cids[0].startsWith("http")
-                ? cids[0]
-                : `ipfs://${cids[0]}`
-              : null),
-          providerReference: payload.providerReference ?? null,
-          rejectionReason: null, // Clears rejection reason
-          submittedAt: new Date().toISOString(),
-        };
-
-        const saved = await verificationRepository.save(existing);
+        const saved = await verificationRepository.save(
+          verificationRepository.create({
+            userId: user.id,
+            wallet,
+            verificationType: payload.verificationType ?? existing.verificationType,
+            status: KYCStatus.PENDING,
+            documents: docData,
+            verifiedAt: null,
+          })
+        );
 
         await userRepository.update(user.id, {
           kycStatus: KYCStatus.PENDING,
@@ -608,23 +663,6 @@ export class KycService {
       }
 
       // No existing verification, create new one
-      const docData: Record<string, unknown> = {
-        sellerDetails: Object.keys(sellerDetails).length > 0 ? sellerDetails : null,
-        documentCids: cids,
-        documentType: payload.documentType ?? "business",
-        documentNumber: payload.documentNumber ?? null,
-        ipfsDocumentUrl:
-          payload.ipfsDocumentUrl ??
-          (cids[0]
-            ? cids[0].startsWith("ipfs://") || cids[0].startsWith("http")
-              ? cids[0]
-              : `ipfs://${cids[0]}`
-            : null),
-        providerReference: payload.providerReference ?? null,
-        rejectionReason: null,
-        submittedAt: new Date().toISOString(),
-      };
-
       const verification = verificationRepository.create({
         userId: user.id,
         wallet,
@@ -867,4 +905,15 @@ export class KycService {
 
     return history;
   }
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
