@@ -78,6 +78,7 @@ import {
 import type { AuthService } from "./services/auth.service";
 import type { WaitlistService } from "./services/waitlist.service";
 import type { NotificationService } from "./services/notification.service";
+import type { NotificationDispatcher } from "./lib/notification-dispatcher";
 import type { InvoiceService } from "./services/invoice.service";
 import type { InvestmentService } from "./services/investment.service";
 import type { SettlementService } from "./services/settlement.service";
@@ -227,6 +228,7 @@ async function probeHorizon(): Promise<"ok" | "degraded"> {
 export interface AppDependencies {
   authService: AuthService;
   notificationService?: NotificationService;
+  notificationDispatcher?: NotificationDispatcher;
   invoiceService?: InvoiceService;
   invoiceCacheService?: InvoiceCacheService;
   investmentService?: InvestmentService;
@@ -305,6 +307,7 @@ export interface AppDependencies {
 export function createApp({
   authService,
   notificationService,
+  notificationDispatcher,
   invoiceService,
   invoiceCacheService,
   investmentService,
@@ -782,6 +785,7 @@ export function createApp({
         invoiceEscrowContractService,
         feeScheduleService,
         waitlistService,
+        notificationDispatcher,
       })
     );
   }

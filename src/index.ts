@@ -342,6 +342,7 @@ export async function bootstrap(): Promise<{
   const app = createApp({
     authService,
     notificationService,
+    notificationDispatcher,
     invoiceService,
     invoiceCacheService,
     investmentService,

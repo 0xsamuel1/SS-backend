@@ -117,7 +117,7 @@ To ensure no events are missed and to prevent processing duplicate events, the i
 
 1. **Polling**: The indexer queries the Soroban RPC `getEvents` endpoint with configured contract IDs and follows its cursor through full pages.
 2. **Event log**: Each event is retained in `soroban_event_logs`, keyed by contract and RPC event ID. Successfully processed entries are marked processed; failed entries remain retryable.
-3. **Checkpointing**: After every returned page has been handled, the indexer stores the latest observed ledger in `soroban_indexer_checkpoints`, including when a ledger contains no matching events.
+3. **Checkpointing**: After every returned page has been handled, the indexer stores the latest observed ledger in `soroban_indexer_checkpoints`, including when a ledger contains no matching events. Workers acquire a renewable lease for the stream; each claim increments its fencing token, and checkpoint writes are accepted only from the current token owner. An expired lease can be reclaimed by another worker without allowing the former owner to advance the checkpoint.
 4. **Resume**: On restart, polling resumes at `last_synced_ledger + 1`. Duplicate event delivery is skipped using the unique contract/event key.
 
 ### Checkpoint Identity and Backfill Policy
