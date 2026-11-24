@@ -237,5 +237,35 @@ describe("MarketplaceService", () => {
       expect(result.data[1].fundingDeadline).toEqual(dueDate);
       expect(result.data[1].dueDate).toEqual(dueDate);
     });
+
+    it("preserves stored yieldBps including explicit 0 and falls back to discountRate only when null (#753)", async () => {
+      const explicitYieldInvoice = {
+        ...mockInvoices[0],
+        discountRate: "10.00",
+        yieldBps: 1111,
+      } as Invoice;
+      const zeroYieldInvoice = {
+        ...mockInvoices[1],
+        discountRate: "5.00",
+        yieldBps: 0,
+      } as Invoice;
+      const legacyNullYieldInvoice = {
+        ...mockInvoices[0],
+        id: "invoice-legacy-yield",
+        discountRate: "4.25",
+        yieldBps: null,
+      } as Invoice;
+
+      mockMarketplaceRepository.findPublishedInvoices.mockResolvedValue({
+        invoices: [explicitYieldInvoice, zeroYieldInvoice, legacyNullYieldInvoice],
+        total: 3,
+      });
+
+      const result = await marketplaceService.getPublishedInvoices();
+
+      expect(result.data[0].yieldBps).toBe(1111);
+      expect(result.data[1].yieldBps).toBe(0);
+      expect(result.data[2].yieldBps).toBe(425);
+    });
   });
 });
