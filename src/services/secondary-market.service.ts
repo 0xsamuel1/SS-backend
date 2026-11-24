@@ -157,6 +157,78 @@ function bpsOf(amount: Decimal, bps: number): Decimal {
   return amount.times(bps).dividedBy(BPS_DENOMINATOR).toDecimalPlaces(4, Decimal.ROUND_HALF_UP);
 }
 
+/** A seller holding as the transfer sees it. */
+export interface TransferableHolding {
+  investmentAmount: string;
+  expectedReturn: string;
+}
+
+export interface HoldingTransfer {
+  /** New values for each holding, in input order (unchanged rows included). */
+  holdings: Array<{ investmentAmount: string; expectedReturn: string }>;
+  /** Principal moved to the buyer; always equal to the requested quantity. */
+  principal: Decimal;
+  /** Projected settlement entitlement (expectedReturn) moved to the buyer. */
+  expectedReturn: Decimal;
+}
+
+/**
+ * Moves `quantity` of principal, and the matching share of projected
+ * settlement entitlement, out of a seller's holdings (issues #749, #750).
+ *
+ * Entitlement follows principal on the primary investment's own basis: taking
+ * `take` of a holding with principal A and expectedReturn R moves
+ * R × take / A, rounded down to 4 decimals. The seller keeps the rounding
+ * dust until a later fill empties the holding, which moves everything left,
+ * so a fully exited holding keeps no entitlement and the seller's plus the
+ * buyer's entitlement always equals what the seller had. The secondary price
+ * plays no part: what the buyer paid is recorded on the trade, not here.
+ *
+ * Holdings are consumed in order; rows with no positive principal are
+ * skipped. If the positive principal cannot cover `quantity`, this throws
+ * 409 UNBACKED_FILL and nothing should be written: the caller runs inside the
+ * purchase transaction, so every write already made is rolled back.
+ */
+export function transferHoldings(
+  holdings: readonly TransferableHolding[],
+  quantity: Decimal
+): HoldingTransfer {
+  let remaining = new Decimal(quantity);
+  let movedReturn = new Decimal(0);
+  const next = holdings.map((holding) => {
+    const amount = new Decimal(holding.investmentAmount);
+    const expected = new Decimal(holding.expectedReturn ?? 0);
+    if (remaining.lte(0) || amount.lte(0)) {
+      return { investmentAmount: holding.investmentAmount, expectedReturn: holding.expectedReturn };
+    }
+    const take = Decimal.min(amount, remaining);
+    const exits = take.eq(amount);
+    const moved = exits
+      ? expected
+      : expected.times(take).dividedBy(amount).toDecimalPlaces(4, Decimal.ROUND_DOWN);
+    remaining = remaining.minus(take);
+    movedReturn = movedReturn.plus(moved);
+    return {
+      investmentAmount: amount.minus(take).toFixed(4),
+      expectedReturn: expected.minus(moved).toFixed(4),
+    };
+  });
+
+  if (!remaining.isZero()) {
+    throw new ServiceError(
+      "UNBACKED_FILL",
+      "The seller's holdings do not cover this fill; nothing was transferred",
+      409,
+      {
+        requested: new Decimal(quantity).toFixed(4),
+        backed: new Decimal(quantity).minus(remaining).toFixed(4),
+      }
+    );
+  }
+
+  return { holdings: next, principal: new Decimal(quantity), expectedReturn: movedReturn };
+}
+
 export class SecondaryMarketService {
   private readonly now: () => Date;
 
@@ -629,8 +701,9 @@ export class SecondaryMarketService {
           ],
           lock: { mode: "pessimistic_write" },
         });
+        // Only positive principal can back a fill (issue #750).
         const sellerHoldings = sellerInvestments.reduce(
-          (sum, inv) => sum.plus(new Decimal(inv.investmentAmount)),
+          (sum, inv) => sum.plus(Decimal.max(new Decimal(inv.investmentAmount), 0)),
           new Decimal(0)
         );
         if (sellerHoldings.lt(buyQuantity)) {
@@ -675,18 +748,21 @@ export class SecondaryMarketService {
         }
         await manager.save(listing);
 
-        // ---- Fraction transfer: seller -> buyer ----
-        let remainingToDeduct = new Decimal(buyQuantity);
-        for (const inv of sellerInvestments) {
-          if (remainingToDeduct.lte(0)) break;
-          const currentInvAmount = new Decimal(inv.investmentAmount);
-          if (currentInvAmount.lte(remainingToDeduct)) {
-            inv.investmentAmount = "0.0000";
-            remainingToDeduct = remainingToDeduct.minus(currentInvAmount);
-          } else {
-            inv.investmentAmount = currentInvAmount.minus(remainingToDeduct).toFixed(4);
-            remainingToDeduct = new Decimal(0);
+        // ---- Fraction transfer: seller -> buyer (issues #749, #750) ----
+        // Principal and projected entitlement move together; an unbacked
+        // fill throws before anything is credited, rolling back the listing
+        // update above with the rest of the transaction.
+        const transfer = transferHoldings(sellerInvestments, buyQuantity);
+        for (const [index, inv] of sellerInvestments.entries()) {
+          const updated = transfer.holdings[index];
+          if (
+            updated.investmentAmount === inv.investmentAmount &&
+            updated.expectedReturn === inv.expectedReturn
+          ) {
+            continue;
           }
+          inv.investmentAmount = updated.investmentAmount;
+          inv.expectedReturn = updated.expectedReturn;
           await manager.save(inv);
         }
 
@@ -701,7 +777,10 @@ export class SecondaryMarketService {
 
         if (buyerInvestment) {
           buyerInvestment.investmentAmount = new Decimal(buyerInvestment.investmentAmount)
-            .plus(buyQuantity)
+            .plus(transfer.principal)
+            .toFixed(4);
+          buyerInvestment.expectedReturn = new Decimal(buyerInvestment.expectedReturn ?? 0)
+            .plus(transfer.expectedReturn)
             .toFixed(4);
           if (buyerWallet && !buyerInvestment.investorWallet) {
             buyerInvestment.investorWallet = buyerWallet;
@@ -713,8 +792,8 @@ export class SecondaryMarketService {
               invoiceId: listing.invoiceId,
               investorId: buyerId,
               investorWallet: buyerWallet,
-              investmentAmount: buyQuantity.toFixed(4),
-              expectedReturn: buyQuantity.toFixed(4),
+              investmentAmount: transfer.principal.toFixed(4),
+              expectedReturn: transfer.expectedReturn.toFixed(4),
               status: InvestmentStatus.CONFIRMED,
             })
           );
