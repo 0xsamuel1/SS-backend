@@ -376,7 +376,8 @@ export function createInvoiceRouter({
     controller.submitInvoiceForReview
   );
 
-  // GET /api/v1/invoices/:id/history - Status transition history, oldest first
+  // GET /api/v1/invoices/:id/history - Lifecycle history, oldest first, cursor-paginated
+  // (?limit=1..100, default 50; ?cursor=meta.nextCursor). Seller and admins only (#795).
   router.get("/:id/history", authenticateJWT, controller.getInvoiceStatusHistory);
 
   // POST /api/v1/invoices/:id/document - Upload document

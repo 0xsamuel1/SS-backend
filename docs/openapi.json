@@ -4488,6 +4488,130 @@
           }
         ]
       }
+    },
+    "/api/v1/invoices/{id}/history": {
+      "get": {
+        "summary": "Invoice lifecycle history, oldest first, cursor-paginated (issue #795)",
+        "description": "Visible to the invoice's seller and to admins; anyone else gets the same 404 as for a missing invoice. Ordered by (createdAt, id). Sellers see actorId only for their own actions; admin and system actors are redacted to null.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "meta.nextCursor from the previous page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of transitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "fromStatus": {
+                            "type": "string"
+                          },
+                          "toStatus": {
+                            "type": "string"
+                          },
+                          "actorRole": {
+                            "type": "string",
+                            "enum": [
+                              "seller",
+                              "admin",
+                              "system"
+                            ]
+                          },
+                          "actorId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "trigger": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "hasMore": {
+                          "type": "boolean"
+                        },
+                        "nextCursor": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_limit or invalid_cursor"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "invoice_not_found (also returned when the caller may not see the invoice)"
+          }
+        }
+      }
     }
   }
 }
