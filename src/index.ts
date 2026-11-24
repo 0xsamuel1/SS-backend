@@ -168,7 +168,8 @@ export async function bootstrap(): Promise<{
     dataSource,
     invoiceStateMachine,
     createInvestmentNotifier(notificationService, logger),
-    investorRiskProfileService
+    config.suitability.required ? investorRiskProfileService : undefined,
+    config.suitability
   );
 
   // ---- Feature: Invoice Draft Autosave (issue #594) ----

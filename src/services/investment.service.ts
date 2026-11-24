@@ -135,13 +135,34 @@ const ACTIVE_INVESTMENT_STATUSES = [InvestmentStatus.PENDING, InvestmentStatus.C
 const SETTLED_INVESTMENT_STATUSES = [InvestmentStatus.SETTLED];
 const FAILED_INVESTMENT_STATUSES = [InvestmentStatus.CANCELLED];
 
+const DEFAULT_SUITABILITY_LOOKUP_TIMEOUT_MS = 5_000;
+
+export interface SuitabilityCheckOptions {
+  /**
+   * Whether suitability is a required precondition. Defaults to true when a
+   * risk-profile service is injected, so omitting the dependency is the
+   * explicit way to run with suitability disabled.
+   */
+  required?: boolean;
+  /** Bounds how long a dependency lookup may delay an investment commitment. */
+  lookupTimeoutMs?: number;
+}
+
 export class InvestmentService {
+  private readonly suitabilityRequired: boolean;
+  private readonly suitabilityLookupTimeoutMs: number;
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly stateMachine: InvoiceStateMachine = createInvoiceStateMachine(),
     private readonly investmentNotifier?: InvestmentNotifier,
-    private readonly riskProfileService?: InvestorRiskProfileService
-  ) {}
+    private readonly riskProfileService?: InvestorRiskProfileService,
+    suitabilityOptions: SuitabilityCheckOptions = {}
+  ) {
+    this.suitabilityRequired = suitabilityOptions.required ?? Boolean(riskProfileService);
+    this.suitabilityLookupTimeoutMs =
+      suitabilityOptions.lookupTimeoutMs ?? DEFAULT_SUITABILITY_LOOKUP_TIMEOUT_MS;
+  }
 
   /**
    * Parses a raw monetary string into a Decimal, enforcing that the value is
@@ -200,6 +221,94 @@ export class InvestmentService {
         `Investor must acknowledge terms version ${currentVersion} before investing`,
         403
       );
+    }
+  }
+
+  /**
+   * Issue #741 — suitability is a required precondition. Business ineligibility
+   * remains a 403 (`SUITABILITY_CHECK_FAILED`), while any failure to obtain or
+   * evaluate the profile fails closed with a stable retryable 503. This check
+   * intentionally runs before the funding transaction so no commitment,
+   * `funded_amount` write, or investment row can exist for unknown eligibility.
+   */
+  private async assertInvestmentSuitable(invoiceId: string, investorWallet: string): Promise<void> {
+    if (!this.suitabilityRequired) {
+      // Disabling suitability is an explicit configuration decision, never the
+      // result of a failed lookup. See docs/INVESTMENT_SUITABILITY.md.
+      logger.debug("investment.suitability_disabled", {
+        investor_wallet: truncateWalletAddress(investorWallet),
+        invoice_id: invoiceId,
+      });
+      return;
+    }
+
+    if (!this.riskProfileService) {
+      throw this.suitabilityUnavailable();
+    }
+
+    const startedAt = Date.now();
+    try {
+      const invoice = await this.withSuitabilityTimeout(
+        this.dataSource.getRepository(Invoice).findOne({ where: { id: invoiceId } }),
+        "invoice lookup"
+      );
+      // No invoice means no possible commitment; the transaction rejects it.
+      if (!invoice) return;
+
+      const riskScore = invoice.riskScore ? parseFloat(invoice.riskScore) : 50;
+      let invoiceRiskCategory: "low" | "medium" | "high" = "medium";
+      if (riskScore < 33) invoiceRiskCategory = "low";
+      else if (riskScore > 66) invoiceRiskCategory = "high";
+
+      const suitability = await this.withSuitabilityTimeout(
+        this.riskProfileService.checkSuitability(investorWallet, invoiceRiskCategory),
+        "profile lookup"
+      );
+      if (!suitability.suitable) {
+        throw new ServiceError(
+          "SUITABILITY_CHECK_FAILED",
+          suitability.reason || "Investment not suitable for your risk profile",
+          403
+        );
+      }
+    } catch (error) {
+      if (error instanceof ServiceError && error.code === "SUITABILITY_CHECK_FAILED") {
+        throw error;
+      }
+      // Never log the profile, questionnaire answers, or provider response.
+      logger.warn("investment.suitability_check_unavailable", {
+        investor_wallet: truncateWalletAddress(investorWallet),
+        invoice_id: invoiceId,
+        error_type: error instanceof Error ? error.name : typeof error,
+        duration_ms: Date.now() - startedAt,
+      });
+      throw this.suitabilityUnavailable();
+    }
+  }
+
+  private suitabilityUnavailable(): ServiceError {
+    return new ServiceError(
+      "SUITABILITY_CHECK_UNAVAILABLE",
+      "Investment suitability validation is temporarily unavailable. Please retry.",
+      503,
+      { retryable: true, retryAfterSeconds: 1 }
+    );
+  }
+
+  private async withSuitabilityTimeout<T>(operation: Promise<T>, operationName: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Suitability ${operationName} timed out`)),
+            this.suitabilityLookupTimeoutMs
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -433,6 +542,7 @@ export class InvestmentService {
     const { invoiceId, investorId, walletAddress } = input;
 
     await this.assertAccreditationAcknowledged(walletAddress);
+    await this.assertInvestmentSuitable(invoiceId, walletAddress);
 
     // #742 — apply the same risk-profile suitability gate used by createInvestment.
     if (this.riskProfileService) {
@@ -686,39 +796,7 @@ export class InvestmentService {
 
     await this.assertAccreditationAcknowledged(investorWallet);
 
-    // Check risk profile suitability (issue #595)
-    if (this.riskProfileService) {
-      try {
-        const invoice = await this.dataSource.getRepository(Invoice).findOne({ where: { id: invoiceId } });
-        if (invoice) {
-          // Determine invoice risk category from risk score
-          const riskScore = invoice.riskScore ? parseFloat(invoice.riskScore) : 50;
-          let invoiceRiskCategory: "low" | "medium" | "high" = "medium";
-          if (riskScore < 33) invoiceRiskCategory = "low";
-          else if (riskScore > 66) invoiceRiskCategory = "high";
-
-          const suitability = await this.riskProfileService.checkSuitability(investorWallet, invoiceRiskCategory);
-
-          if (!suitability.suitable) {
-            throw new ServiceError(
-              "SUITABILITY_CHECK_FAILED",
-              suitability.reason || "Investment not suitable for your risk profile",
-              403
-            );
-          }
-        }
-      } catch (error) {
-        if (error instanceof ServiceError && error.code === "SUITABILITY_CHECK_FAILED") {
-          throw error;
-        }
-        // Log but don't fail investment if suitability check fails unexpectedly
-        logger.warn("investment.suitability_check_error", {
-          investorWallet,
-          invoiceId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+    await this.assertInvestmentSuitable(invoiceId, investorWallet);
 
     // #743 — validate investment amount via the shared finite-decimal parser before the database transaction.
     const amount = this.parseMonetaryAmount(investmentAmount);
@@ -996,7 +1074,14 @@ export function createInvestmentService(
   dataSource: DataSource,
   stateMachine?: InvoiceStateMachine,
   investmentNotifier?: InvestmentNotifier,
-  riskProfileService?: InvestorRiskProfileService
+  riskProfileService?: InvestorRiskProfileService,
+  suitabilityOptions?: SuitabilityCheckOptions
 ): InvestmentService {
-  return new InvestmentService(dataSource, stateMachine, investmentNotifier, riskProfileService);
+  return new InvestmentService(
+    dataSource,
+    stateMachine,
+    investmentNotifier,
+    riskProfileService,
+    suitabilityOptions
+  );
 }
