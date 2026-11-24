@@ -17,7 +17,7 @@ import {
 } from "../types/enums";
 import { ServiceError } from "../utils/service-error";
 import { logger } from "../observability/logger";
-import { isPastDueDate } from "../utils/date.utils";
+import { isPastSecondaryTradingCutoff, secondaryTradingCutoff } from "../utils/date.utils";
 import type { NotificationService } from "./notification.service";
 import type { FeeScheduleService } from "./fee-schedule.service";
 import type { TransitionEffect } from "../lib/invoice-state-machine";
@@ -184,7 +184,8 @@ export class SecondaryMarketService {
         "Price per fraction"
       );
 
-      if (expiresAt && new Date(expiresAt) <= new Date()) {
+      const now = this.now();
+      if (expiresAt && new Date(expiresAt) <= now) {
         throw new ServiceError("INVALID_EXPIRY", "Expiry date must be in the future", 400);
       }
 
@@ -197,13 +198,11 @@ export class SecondaryMarketService {
         throw new ServiceError("INVOICE_NOT_FOUND", "Invoice not found", 404);
       }
 
-      // Check if invoice has matured (reject with 422)
+      // Matured (422): the same cutoff purchase and relisting use (issue #747).
       const isMatured =
         invoice.status === InvoiceStatus.SETTLED ||
         invoice.status === InvoiceStatus.FAILED ||
-        (invoice.dueDate
-          ? isPastDueDate(invoice.dueDate) || new Date(invoice.dueDate).getTime() <= Date.now()
-          : false);
+        isPastSecondaryTradingCutoff(invoice.dueDate, now);
 
       if (isMatured) {
         throw new ServiceError(
@@ -256,13 +255,22 @@ export class SecondaryMarketService {
         );
       }
 
+      // A listing cannot outlive the trading cutoff; without a custom expiry
+      // it expires exactly at the cutoff (issue #747).
+      const tradingCutoff = invoice.dueDate ? secondaryTradingCutoff(invoice.dueDate) : null;
+      if (expiresAt && tradingCutoff && new Date(expiresAt) > tradingCutoff) {
+        throw new ServiceError(
+          "INVALID_EXPIRY",
+          "Listing expiry cannot be later than the invoice's trading cutoff",
+          400,
+          { trading_cutoff: tradingCutoff.toISOString() }
+        );
+      }
       const effectiveExpiresAt = expiresAt
         ? new Date(expiresAt)
-        : invoice.dueDate
-          ? new Date(invoice.dueDate)
-          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        : (tradingCutoff ?? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000));
 
-      if (effectiveExpiresAt <= new Date()) {
+      if (effectiveExpiresAt <= now) {
         throw new ServiceError("INVALID_EXPIRY", "Expiry date must be in the future", 400);
       }
 
@@ -314,9 +322,9 @@ export class SecondaryMarketService {
       const currentlyListed = activeListings
         .filter((l) => {
           if (typeof l.isExpired === "function") {
-            return !l.isExpired();
+            return !l.isExpired(now);
           }
-          return !l.expiresAt || new Date(l.expiresAt).getTime() >= Date.now();
+          return !l.expiresAt || new Date(l.expiresAt).getTime() >= now.getTime();
         })
         .reduce((sum, l) => sum.plus(new Decimal(l.quantity)), new Decimal(0));
 
@@ -377,7 +385,12 @@ export class SecondaryMarketService {
       .leftJoinAndSelect("listing.invoice", "invoice")
       .where("listing.deleted_at IS NULL")
       .andWhere("listing.status = :status", { status: ListingStatus.ACTIVE })
-      .andWhere("listing.expires_at > :now", { now: new Date() });
+      .andWhere("listing.expires_at > :now", { now: this.now() })
+      // Matured invoices are not tradable whatever the listing's own expiry
+      // (issue #747): due_date > today is now < the start of the due day.
+      .andWhere("(invoice.due_date IS NULL OR invoice.due_date > :today)", {
+        today: this.now().toISOString().slice(0, 10),
+      });
 
     // Apply filters
     if (filters.invoiceId) {
@@ -548,6 +561,18 @@ export class SecondaryMarketService {
             "INVALID_INVOICE_STATUS",
             "Only funded invoices can be purchased on the secondary market",
             400
+          );
+        }
+        // An invoice can stay FUNDED past maturity while it awaits settlement,
+        // and a listing can carry an expiry later than maturity. Neither makes
+        // it tradable: the cutoff is checked here, on the locked invoice, with
+        // the same rule as listing creation (issue #747).
+        if (isPastSecondaryTradingCutoff(invoice.dueDate, now)) {
+          throw new ServiceError(
+            "INVOICE_MATURED",
+            "The invoice has reached maturity; its fractions can no longer be traded",
+            422,
+            { trading_cutoff: secondaryTradingCutoff(invoice.dueDate).toISOString() }
           );
         }
         const settlementIntent = await manager.findOne(SettlementIntent, {
@@ -1000,7 +1025,11 @@ export class SecondaryMarketService {
         where: { id: listing.invoiceId },
         lock: { mode: "pessimistic_write" },
       });
-      if (!invoice || invoice.status !== InvoiceStatus.FUNDED || isPastDueDate(invoice.dueDate))
+      if (
+        !invoice ||
+        invoice.status !== InvoiceStatus.FUNDED ||
+        isPastSecondaryTradingCutoff(invoice.dueDate, this.now())
+      )
         throw this.listingConflict(listing, revision, "Invoice is no longer tradable");
       const settling = await manager.findOne(SettlementIntent, {
         where: {
