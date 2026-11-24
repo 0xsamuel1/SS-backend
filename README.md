@@ -137,6 +137,7 @@ Feature-specific references are available under [`docs/`](./docs/):
 | [`docs/INVOICE_LIFECYCLE.md`](./docs/INVOICE_LIFECYCLE.md) | Invoice state machine |
 | [`docs/INVOICE_DOCUMENT_UPLOAD.md`](./docs/INVOICE_DOCUMENT_UPLOAD.md) | Document upload flow |
 | [`docs/INVOICE_INVEST_API.md`](./docs/INVOICE_INVEST_API.md) | Fractional investment flow |
+| [`docs/INVOICE_EXTENSIONS.md`](./docs/INVOICE_EXTENSIONS.md) | Funding deadline extensions |
 | [`docs/SOROBAN_INTEGRATION_GUIDE.md`](./docs/SOROBAN_INTEGRATION_GUIDE.md) | Escrow/funding integration |
 | [`docs/DB_WORKFLOW.md`](./docs/DB_WORKFLOW.md) | Migration workflow |
 | [`docs/IPFS.md`](./docs/IPFS.md) | IPFS pinning details |

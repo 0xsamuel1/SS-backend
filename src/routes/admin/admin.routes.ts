@@ -32,7 +32,8 @@ import { createAdminAnalyticsTrendsRouter } from "./analytics-trends.routes";
 import { createAdminSettlementRouter } from "./settlement.routes";
 import { createAdminFeesRouter } from "./fees.routes";
 import { createWaitlistRouter } from "./waitlist.routes";
-import { AppError } from "@/utils/http-error";
+import { AppError, PublicAppError } from "@/utils/http-error";
+import { ServiceError } from "@/utils/service-error";
 import { logger } from "@/observability/logger";
 import type { AuthenticatedRequest } from "@/types/auth";
 import { listInvoices } from "./list-invoices";
@@ -331,6 +332,12 @@ export function createAdminRouter({
 
           res.status(200).json({ success: true, data: result.request });
         } catch (error) {
+          if (error instanceof ServiceError) {
+            // Domain outcomes (not found, already reviewed, expired, beyond
+            // maturity...) keep their status and code instead of becoming 500s.
+            next(new PublicAppError(error.statusCode, error.message, error.code, error.details));
+            return;
+          }
           logger.error("Admin extension review failed", {
             error: error instanceof Error ? error.message : String(error),
           });

@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction, type RequestHandler } from "express";
+import { endOfDayUTC } from "../utils/date.utils";
 import multer from "multer";
 import rateLimit from "express-rate-limit";
 import Joi from "joi";
@@ -456,7 +457,13 @@ export function createInvoiceRouter({
           if (!proposedRaw) {
             throw new PublicAppError(400, "proposedDeadline is required", "MISSING_FIELDS");
           }
-          const proposedDeadline = new Date(proposedRaw);
+          // A bare calendar date means the end of that day in UTC, the same
+          // date-only convention as invoice maturity (issue #733). Timestamps
+          // with an offset are taken as the instant they name.
+          const proposedDeadline =
+            typeof proposedRaw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(proposedRaw.trim())
+              ? endOfDayUTC(proposedRaw.trim())
+              : new Date(proposedRaw);
           const request = await extensionService.requestExtension({
             invoiceId: Array.isArray(req.params.id) ? req.params.id[0] : req.params.id,
             sellerId: user.id,
