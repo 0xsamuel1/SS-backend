@@ -144,6 +144,38 @@ export class InvestmentService {
   ) {}
 
   /**
+   * Parses a raw monetary string into a Decimal, enforcing that the value is
+   * finite, positive, and has at most four decimal places.  Both investment
+   * entry-points (createInvestment and investInInvoice) delegate here so the
+   * accepted monetary domain is identical on every route.
+   *
+   * Throws a structured 400 ServiceError for each failure mode so callers
+   * always receive a stable, client-readable error before any side effects.
+   */
+  private parseMonetaryAmount(raw: string): Decimal {
+    let amount: Decimal;
+    try {
+      amount = new Decimal(raw);
+    } catch {
+      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be a number", 400);
+    }
+    if (!amount.isFinite()) {
+      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be a finite number", 400);
+    }
+    if (amount.lte(0)) {
+      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be greater than zero", 400);
+    }
+    if (amount.decimalPlaces() > 4) {
+      throw new ServiceError(
+        "INVALID_AMOUNT",
+        "Investment amount supports at most 4 decimal places",
+        400
+      );
+    }
+    return amount;
+  }
+
+  /**
    * Issue #473 — block investment until the wallet has acknowledged the
    * current TERMS_VERSION. Prior acknowledgements for older versions do not
    * satisfy this check (re-ack required on bump).
@@ -402,22 +434,39 @@ export class InvestmentService {
 
     await this.assertAccreditationAcknowledged(walletAddress);
 
-    let amount: Decimal;
-    try {
-      amount = new Decimal(input.amount);
-    } catch {
-      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be a number", 400);
+    // #742 — apply the same risk-profile suitability gate used by createInvestment.
+    if (this.riskProfileService) {
+      try {
+        const invoice = await this.dataSource.getRepository(Invoice).findOne({ where: { id: invoiceId } });
+        if (invoice) {
+          const riskScore = invoice.riskScore ? parseFloat(invoice.riskScore) : 50;
+          let invoiceRiskCategory: "low" | "medium" | "high" = "medium";
+          if (riskScore < 33) invoiceRiskCategory = "low";
+          else if (riskScore > 66) invoiceRiskCategory = "high";
+
+          const suitability = await this.riskProfileService.checkSuitability(walletAddress, invoiceRiskCategory);
+          if (!suitability.suitable) {
+            throw new ServiceError(
+              "SUITABILITY_CHECK_FAILED",
+              suitability.reason || "Investment not suitable for your risk profile",
+              403
+            );
+          }
+        }
+      } catch (error) {
+        if (error instanceof ServiceError && error.code === "SUITABILITY_CHECK_FAILED") {
+          throw error;
+        }
+        logger.warn("investment.suitability_check_error", {
+          investorWallet: walletAddress,
+          invoiceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
-    if (!amount.isFinite() || amount.lte(0)) {
-      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be greater than zero", 400);
-    }
-    if (amount.decimalPlaces() > 4) {
-      throw new ServiceError(
-        "INVALID_AMOUNT",
-        "Investment amount supports at most 4 decimal places",
-        400
-      );
-    }
+
+    // #743 — use the shared finite-decimal parser (same domain as createInvestment).
+    const amount = this.parseMonetaryAmount(input.amount);
 
     const fundingBlock = String(input.ledgerSequence ?? currentFundingWindow());
     const MAX_ATTEMPTS = 3;
@@ -671,23 +720,8 @@ export class InvestmentService {
       }
     }
 
-    // Validate investment amount before the database transaction
-    let amount: Decimal;
-    try {
-      amount = new Decimal(investmentAmount);
-    } catch {
-      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be a number", 400);
-    }
-    if (!amount.isFinite() || amount.lte(0)) {
-      throw new ServiceError("INVALID_AMOUNT", "Investment amount must be greater than zero", 400);
-    }
-    if (amount.decimalPlaces() > 4) {
-      throw new ServiceError(
-        "INVALID_AMOUNT",
-        "Investment amount supports at most 4 decimal places",
-        400
-      );
-    }
+    // #743 — validate investment amount via the shared finite-decimal parser before the database transaction.
+    const amount = this.parseMonetaryAmount(investmentAmount);
 
     const MAX_RETRIES = 3;
     let attempt = 0;
